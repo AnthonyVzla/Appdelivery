@@ -46,10 +46,34 @@
         // Variables Globales del Entorno (MANDATORIO USAR)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const firebaseConfigRaw = typeof __firebase_config !== 'undefined' && __firebase_config ? __firebase_config : '{}';
-        const firebaseConfig = JSON.parse(firebaseConfigRaw);
+        let firebaseConfig = {};
+        
+        try {
+            firebaseConfig = JSON.parse(firebaseConfigRaw);
+        } catch (e) {
+            console.error("Error al parsear la configuración de Firebase:", e);
+        }
+
+        // === AJUSTE CRÍTICO: Configuración de respaldo para evitar el bloqueo del script ===
+        let effectiveFirebaseConfig = firebaseConfig;
+        let isExternalRun = false;
+
+        // Si la configuración está vacía, se asume que se está ejecutando fuera del entorno Canvas.
+        if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.projectId) {
+            // Configuración mínima ficticia para que initializeApp no lance un error fatal.
+            effectiveFirebaseConfig = {
+                apiKey: "AIzaSy_TEST_API_KEY",
+                authDomain: "test-app.firebaseapp.com",
+                projectId: "test-project-12345"
+            };
+            isExternalRun = true;
+            console.warn("ADVERTENCIA: Usando configuración de Firebase de respaldo. Los datos no se persistirán.");
+        }
+        // ================================================================================
+
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        const app = initializeApp(firebaseConfig);
+        const app = initializeApp(effectiveFirebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
         
@@ -70,6 +94,7 @@
             editingRestaurant: null,
             editingMotorizado: null,
             editingUser: null,
+            isExternalRun: isExternalRun, // Indica si estamos usando la configuración ficticia
         };
 
         // Autenticación al inicio
@@ -124,7 +149,12 @@
 
         // Configuración de Listeners para datos en tiempo real (MANDATORIO onSnapshot)
         const setupFirestoreListeners = () => {
-            if (!currentState.isAuthReady) return;
+            if (!currentState.isAuthReady || currentState.isExternalRun) {
+                 if (currentState.isExternalRun) {
+                    console.log("Modo de ejecución externa: Los listeners de Firestore están desactivados.");
+                 }
+                 return;
+            }
 
             // Listener para Restaurantes (Público)
             onSnapshot(getPublicCollectionRef('restaurants'), (snapshot) => {
@@ -258,6 +288,15 @@
                 console.error("Faltan datos o el carrito está vacío.");
                 return;
             }
+            
+            if (currentState.isExternalRun) {
+                console.error("No se puede enviar el pedido. La aplicación se está ejecutando en modo externo sin conexión a Firestore real.");
+                // Simulación de pedido exitoso
+                currentState.cart = [];
+                closeMenu();
+                render();
+                return;
+            }
 
             const orderData = {
                 restaurantId: currentState.activeRestaurant.id,
@@ -318,6 +357,11 @@
         };
 
         const handleCrudAction = async (collectionName, data, action, docId = null) => {
+            if (currentState.isExternalRun) {
+                console.error("No se puede realizar la acción CRUD. La aplicación se está ejecutando en modo externo sin conexión a Firestore real.");
+                return;
+            }
+            
             try {
                 if (action === 'add') {
                     if (collectionName === 'products' && currentState.editingRestaurant) {
@@ -364,6 +408,11 @@
         };
 
         const updateOrderStatus = async (orderId, newStatus) => {
+            if (currentState.isExternalRun) {
+                console.error("No se puede actualizar el estado. Modo de ejecución externa.");
+                return;
+            }
+            
             try {
                 const orderRef = getPublicDocRef('orders', orderId);
                 await updateDoc(orderRef, { status: newStatus });
@@ -384,14 +433,23 @@
             // Mostrar el cargador si Firebase no está listo
             if (!currentState.isAuthReady) {
                 appDiv.innerHTML = `
-                    <div class="flex items-center justify-center min-h-screen">
-                        <div class="animate-spin rounded-full h-32 w-32 border-b-2 border-red-500"></div>
-                        <p class="ml-4 text-xl text-gray-600">Cargando Bambam Delivery...</p>
-                        <p class="ml-4 text-sm text-gray-400 mt-2">ID Ambiente: ${appId}</p>
+                    <div class="flex flex-col items-center justify-center min-h-screen">
+                        <div class="animate-spin rounded-full h-16 w-16 border-b-4 border-red-500"></div>
+                        <p class="mt-4 text-xl text-gray-600">Cargando Bambam Delivery...</p>
+                        <p class="mt-2 text-sm text-gray-400">ID Ambiente: ${appId}</p>
                     </div>
                 `;
                 return;
             }
+            
+            // Si estamos en modo externo, mostrar advertencia en la parte superior
+            const externalWarning = currentState.isExternalRun ? `
+                <div class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-800 p-4 fixed top-0 left-0 right-0 z-50 shadow-lg" role="alert">
+                    <p class="font-bold">MODO DEMO/EXTERNO</p>
+                    <p class="text-sm">La aplicación se está ejecutando sin una configuración de Firebase real. Los datos no se guardarán ni cargarán en tiempo real. Esto soluciona la pantalla en blanco en GitHub Pages.</p>
+                </div>
+            ` : '';
+
 
             if (currentState.view === 'customer') {
                 content = renderCustomerView();
@@ -401,7 +459,7 @@
                 content = renderAdminPanel();
             }
 
-            appDiv.innerHTML = content;
+            appDiv.innerHTML = externalWarning + content;
             
             // Re-asignar eventos después de inyectar el HTML
             attachEventListeners();
@@ -412,8 +470,16 @@
         // ====================
 
         const renderCustomerView = () => {
-            const restaurantsList = currentState.restaurants.length > 0
-                ? currentState.restaurants.map(rest => `
+            // Datos de demostración si estamos en modo externo
+            const displayRestaurants = currentState.isExternalRun 
+                ? [
+                    { id: 'r1', name: 'Parrilla Express', description: 'Las mejores carnes a la brasa', whatsapp: '+584120001111', logoUrl: 'https://placehold.co/80x80/ef4444/ffffff?text=Parrilla' },
+                    { id: 'r2', name: 'Sushi Nigiri', description: 'Fusión japonesa y venezolana', whatsapp: '+584120002222', logoUrl: 'https://placehold.co/80x80/ef4444/ffffff?text=Sushi' }
+                  ] 
+                : currentState.restaurants;
+
+            const restaurantsList = displayRestaurants.length > 0
+                ? displayRestaurants.map(rest => `
                     <div class="card p-4 flex items-center space-x-4 cursor-pointer hover:shadow-lg transition duration-200" onclick="window.openMenu('${rest.id}')">
                         <img src="${rest.logoUrl || 'https://placehold.co/80x80/ef4444/ffffff?text=Logo'}" onerror="this.onerror=null;this.src='https://placehold.co/80x80/ef4444/ffffff?text=Logo'" alt="Logo" class="w-20 h-20 rounded-lg object-cover">
                         <div>
@@ -434,7 +500,7 @@
                     </div>
                 </header>
 
-                <main class="max-w-7xl mx-auto p-4 flex-grow">
+                <main class="max-w-7xl mx-auto p-4 flex-grow pt-10">
                     <h2 class="text-2xl font-semibold mb-6 text-gray-800">Locales Activos Cerca de Ti</h2>
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                         ${restaurantsList}
@@ -448,13 +514,24 @@
                     <p class="text-xs text-gray-500 mt-2">© 2024 Bambam Delivery. Todos los derechos reservados.</p>
                 </footer>
 
-                ${currentState.activeRestaurant ? renderMenuModal() : ''}
+                ${currentState.activeRestaurant ? renderMenuModal(displayRestaurants.find(r => r.id === currentState.activeRestaurant.id)) : ''}
             `;
         };
 
-        const renderMenuModal = () => {
-            const restaurant = currentState.activeRestaurant;
-            const restaurantProducts = currentState.products.filter(p => p.restaurantId === restaurant.id);
+        const renderMenuModal = (activeRestaurant) => {
+            const restaurant = activeRestaurant || currentState.activeRestaurant;
+            
+            // Datos de demostración si estamos en modo externo
+            const mockProducts = [
+                { id: 'p1', name: 'Hamburguesa Triple', price: 8.50, imageUrl: 'https://placehold.co/60x60/f87171/ffffff?text=Burger', restaurantId: 'r1' },
+                { id: 'p2', name: 'Tequeños x12', price: 4.00, imageUrl: 'https://placehold.co/60x60/f87171/ffffff?text=Tequeños', restaurantId: 'r1' },
+                { id: 'p3', name: 'Roll de Salmón', price: 12.99, imageUrl: 'https://placehold.co/60x60/f87171/ffffff?text=Sushi', restaurantId: 'r2' }
+            ];
+
+            const restaurantProducts = currentState.isExternalRun 
+                ? mockProducts.filter(p => p.restaurantId === restaurant.id)
+                : currentState.products.filter(p => p.restaurantId === restaurant.id);
+            
             const subtotal = currentState.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
             const menuItems = restaurantProducts.length > 0
@@ -702,7 +779,15 @@
         // --- Sub-secciones del Admin ---
 
         const renderRestaurantManagement = () => {
-            const list = currentState.restaurants.map(rest => `
+            // Usa datos de demostración en modo externo para que la vista no esté vacía.
+            const displayRestaurants = currentState.isExternalRun 
+                ? [
+                    { id: 'r1', name: 'Parrilla Express (DEMO)', description: 'Solo visible en modo DEMO', whatsapp: '+584120001111' },
+                    { id: 'r2', name: 'Sushi Nigiri (DEMO)', description: 'Solo visible en modo DEMO', whatsapp: '+584120002222' }
+                  ] 
+                : currentState.restaurants;
+
+            const list = displayRestaurants.map(rest => `
                 <div class="card p-4 flex justify-between items-center mb-3">
                     <div>
                         <p class="font-bold text-lg">${rest.name}</p>
@@ -731,6 +816,10 @@
         // Función auxiliar para eliminar local con confirmación (usando console.log en lugar de alert/confirm)
         window.handleDeleteRestaurant = (id, name) => {
             console.log(`Intentando eliminar el local: ${name} (ID: ${id})...`);
+            if (currentState.isExternalRun) {
+                console.warn("Acción de eliminación bloqueada en modo DEMO.");
+                return;
+            }
             if (confirm(`¿Seguro que quieres eliminar el local "${name}"? Esto también eliminará sus productos asociados.`)) {
                 handleCrudAction('restaurants', null, 'delete', id);
                 // También deberías buscar y eliminar todos los productos con restaurantId = id en un app real.
@@ -760,7 +849,7 @@
             }
 
             // Gestión de productos para el restaurante seleccionado
-            const productsList = currentState.products
+            const restaurantProducts = currentState.products
                 .filter(p => p.restaurantId === restaurant.id)
                 .map(prod => `
                     <div class="card p-4 flex justify-between items-center mb-3">
@@ -789,7 +878,7 @@
                     + Agregar Nuevo Producto
                 </button>
                 <div class="space-y-4">
-                    ${productsList.length > 0 ? productsList : '<p class="text-gray-500">Este local no tiene productos registrados.</p>'}
+                    ${restaurantProducts.length > 0 ? restaurantProducts : '<p class="text-gray-500">Este local no tiene productos registrados.</p>'}
                 </div>
             `;
         };
@@ -842,20 +931,27 @@
             // Pedidos finalizados (Entregado, Cancelado)
             const finalOrders = currentState.orders.filter(o => o.status === 'Entregado' || o.status === 'Cancelado');
 
-            const historyList = finalOrders.map(order => `
-                <div class="card p-4 mb-4 ${order.status === 'Entregado' ? 'bg-green-50' : 'bg-red-50'}">
-                    <div class="flex justify-between items-start mb-2">
-                        <div>
-                            <p class="font-bold text-lg">${order.restaurantName} - ${order.customerName}</p>
-                            <p class="text-xs text-gray-500">Fecha: ${order.timestamp ? new Date(order.timestamp.toDate()).toLocaleString() : 'N/A'}</p>
+            const historyList = finalOrders.map(order => {
+                // Asegurar que timestamp existe y es un objeto Timestamp para llamar a toDate()
+                const dateString = order.timestamp && typeof order.timestamp.toDate === 'function' 
+                    ? new Date(order.timestamp.toDate()).toLocaleString() 
+                    : 'N/A';
+                    
+                return `
+                    <div class="card p-4 mb-4 ${order.status === 'Entregado' ? 'bg-green-50' : 'bg-red-50'}">
+                        <div class="flex justify-between items-start mb-2">
+                            <div>
+                                <p class="font-bold text-lg">${order.restaurantName} - ${order.customerName}</p>
+                                <p class="text-xs text-gray-500">Fecha: ${dateString}</p>
+                            </div>
+                            <span class="px-3 py-1 rounded-full text-xs font-semibold ${order.status === 'Entregado' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}">
+                                ${order.status}
+                            </span>
                         </div>
-                        <span class="px-3 py-1 rounded-full text-xs font-semibold ${order.status === 'Entregado' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}">
-                            ${order.status}
-                        </span>
+                        <p class="text-lg font-bold text-gray-800">Total: $${order.total.toFixed(2)}</p>
                     </div>
-                    <p class="text-lg font-bold text-gray-800">Total: $${order.total.toFixed(2)}</p>
-                </div>
-            `).join('');
+                `;
+            }).join('');
 
             return `
                 <h1 class="text-3xl font-bold mb-6">📋 Historial de Pedidos (${finalOrders.length})</h1>
@@ -1082,7 +1178,13 @@
 
         const attachEventListeners = () => {
             // Cliente - Eventos del Carrito/Menú
-            window.openMenu = (restaurantId) => openMenu(currentState.restaurants.find(r => r.id === restaurantId));
+            window.openMenu = (restaurantId) => {
+                const restaurant = currentState.isExternalRun 
+                    ? ({ id: restaurantId, name: 'Local Ficticio', description: 'Menú de demostración', whatsapp: '+584120000000' }) // Datos ficticios
+                    : currentState.restaurants.find(r => r.id === restaurantId);
+                openMenu(restaurant);
+            };
+
             window.closeMenu = closeMenu;
             window.openCart = () => {
                 const cartDrawer = document.getElementById('cart-drawer');

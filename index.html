@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bambam Delivery - Tu App de Envíos</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f7f7; }
+        .btn-primary {
+            background-color: #ef4444; /* Rojo de Delivery */
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: background-color 0.3s;
+        }
+        .btn-primary:hover { background-color: #dc2626; }
+        .card { background-color: white; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06); }
+        .modal-overlay { background-color: rgba(0, 0, 0, 0.6); }
+        /* Clases específicas para el panel admin */
+        .admin-sidebar { background-color: #1f2937; color: white; }
+        .admin-nav-item.active { background-color: #374151; }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen flex flex-col">
+        <!-- Contenido principal cargado por JS -->
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        console.log("Script de la aplicación iniciado. Intentando cargar módulos de Firebase...");
+        
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // =========================================================================
+        // 1. CONFIGURACIÓN Y AUTENTICACIÓN DE FIREBASE
+        // =========================================================================
+
+        // Variables Globales del Entorno (MANDATORIO USAR)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfigRaw = typeof __firebase_config !== 'undefined' && __firebase_config ? __firebase_config : '{}';
+        const firebaseConfig = JSON.parse(firebaseConfigRaw);
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        let currentState = {
+            view: 'customer', // 'customer' | 'login' | 'admin'
+            userId: null,
+            isAdmin: false,
+            isAuthReady: false,
+            restaurants: [],
+            products: [],
+            motorizados: [],
+            adminUsers: [],
+            orders: [],
+            activeRestaurant: null, // Restaurant seleccionado por el cliente
+            cart: [],
+            adminSection: 'restaurants', // 'restaurants' | 'products' | 'orders' | 'motorizados' | 'users'
+            editingProduct: null,
+            editingRestaurant: null,
+            editingMotorizado: null,
+            editingUser: null,
+        };
+
+        // Autenticación al inicio
+        const initializeAuth = async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Error al autenticar:", error);
+                // Si la autenticación falla, intentar anónimo como fallback
+                await signInAnonymously(auth);
+            }
+        };
+
+        // Listener de estado de autenticación
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentState.userId = user.uid;
+                currentState.isAuthReady = true;
+                // Verificar si el usuario es el administrador principal (para la demo, solo el usuario inicial)
+                // Nota: Reemplace 'system-user-uid' por la lógica real en producción.
+                currentState.isAdmin = (user.uid === 'system-user-uid'); 
+                
+                // Si el usuario ya estaba en modo Admin, recargar la vista.
+                if (currentState.view === 'admin' || currentState.view === 'login') {
+                    render();
+                }
+
+                // Iniciar listeners de Firestore solo después de la autenticación
+                setupFirestoreListeners();
+                
+            } else {
+                currentState.userId = null;
+                currentState.isAuthReady = true;
+                currentState.isAdmin = false;
+                
+            }
+            // Segunda renderización una vez que la autenticación está lista
+            render(); 
+        });
+
+        // =========================================================================
+        // 2. UTILIDADES DE FIRESTORE
+        // =========================================================================
+
+        const getPublicCollectionRef = (collectionName) => collection(db, `artifacts/${appId}/public/data/${collectionName}`);
+        const getPrivateCollectionRef = (collectionName) => collection(db, `artifacts/${appId}/users/${currentState.userId}/${collectionName}`);
+        const getPublicDocRef = (collectionName, docId) => doc(db, `artifacts/${appId}/public/data/${collectionName}`, docId);
+
+        // Configuración de Listeners para datos en tiempo real (MANDATORIO onSnapshot)
+        const setupFirestoreListeners = () => {
+            if (!currentState.isAuthReady) return;
+
+            // Listener para Restaurantes (Público)
+            onSnapshot(getPublicCollectionRef('restaurants'), (snapshot) => {
+                currentState.restaurants = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                render();
+            }, (error) => console.error("Error fetching restaurants:", error));
+
+            // Listener para Motorizados (Privado - solo Admin/Soporte lo usan)
+            if (currentState.isAdmin) {
+                onSnapshot(getPrivateCollectionRef('motorizados'), (snapshot) => {
+                    currentState.motorizados = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    render();
+                }, (error) => console.error("Error fetching motorizados:", error));
+
+                // Listener para Usuarios de Soporte (Privado - solo Admin lo usa)
+                onSnapshot(getPrivateCollectionRef('admin_users'), (snapshot) => {
+                    currentState.adminUsers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    render();
+                }, (error) => console.error("Error fetching admin users:", error));
+
+                // Listener para Pedidos (Público, pero filtrado o gestionado por Admin)
+                onSnapshot(getPublicCollectionRef('orders'), (snapshot) => {
+                    // Ordenar por timestamp descendente para ver los más nuevos primero
+                    currentState.orders = snapshot.docs
+                        .map(doc => ({ id: doc.id, ...doc.data() }))
+                        .sort((a, b) => (b.timestamp?.toDate() || 0) - (a.timestamp?.toDate() || 0));
+                    render();
+                }, (error) => console.error("Error fetching orders:", error));
+
+                // Listener para Productos (Público - usado por cliente y admin)
+                // Usamos un query simple para traerlos todos y filtrar en el cliente
+                onSnapshot(getPublicCollectionRef('products'), (snapshot) => {
+                    currentState.products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    render();
+                }, (error) => console.error("Error fetching products:", error));
+            }
+        };
+
+
+        // =========================================================================
+        // 3. LÓGICA DE LA APLICACIÓN
+        // =========================================================================
+
+        const navigate = (view) => {
+            currentState.view = view;
+            render();
+        };
+        
+        const changeAdminSection = (section) => {
+            currentState.adminSection = section;
+            render();
+        };
+
+        // --- Lógica del Cliente ---
+
+        const openMenu = (restaurant) => {
+            currentState.activeRestaurant = restaurant;
+            currentState.cart = []; // Limpiar carrito al abrir nuevo local
+            render();
+        };
+
+        const closeMenu = () => {
+            currentState.activeRestaurant = null;
+            render();
+        };
+
+        const addToCart = (product) => {
+            const existingItem = currentState.cart.find(item => item.id === product.id && !item.observation);
+
+            if (existingItem) {
+                existingItem.quantity += 1;
+            } else {
+                currentState.cart.push({ ...product, quantity: 1, observation: '' });
+            }
+            render();
+        };
+
+        const updateCartItem = (itemId, quantity, observation = null) => {
+            const item = currentState.cart.find(item => item.id === itemId);
+            if (!item) return;
+
+            if (observation !== null) {
+                item.observation = observation;
+            }
+
+            if (quantity <= 0) {
+                currentState.cart = currentState.cart.filter(i => i.id !== itemId);
+            } else {
+                item.quantity = quantity;
+            }
+            render();
+        };
+
+        const createWhatsAppOrderLink = (restaurant, orderDetails) => {
+            const total = orderDetails.items.reduce((sum, item) => sum + (item.price * item.quantity), 0).toFixed(2);
+            
+            let message = `*Pedido Nuevo de ${restaurant.name}*\n\n`;
+            message += `*Cliente:* ${orderDetails.name} ${orderDetails.surname}\n`;
+            message += `*Teléfono:* ${orderDetails.phone}\n`;
+            message += `*Dirección:* ${orderDetails.address}\n\n`;
+            message += `*Detalles del Pedido:*\n`;
+
+            orderDetails.items.forEach((item, index) => {
+                message += `${index + 1}. ${item.quantity} x ${item.name} ($${(item.price * item.quantity).toFixed(2)})`;
+                if (item.observation) {
+                    message += ` (Obs: ${item.observation})`;
+                }
+                message += '\n';
+            });
+
+            message += `\n*Total a Pagar:* $${total}`;
+            message += `\n\n*IMPORTANTE:* Por favor, envía tu ubicación actual por GPS a este chat para completar la entrega. ¡Gracias!`;
+
+            const encodedMessage = encodeURIComponent(message);
+            // El número de WhatsApp del negocio se configura en el panel admin (usamos restaurant.whatsapp)
+            const whatsappUrl = `https://wa.me/${restaurant.whatsapp}?text=${encodedMessage}`;
+            
+            return whatsappUrl;
+        };
+
+        const submitOrder = async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const name = form.name.value.trim();
+            const surname = form.surname.value.trim();
+            const address = form.address.value.trim();
+            const phone = form.phone.value.trim();
+
+            if (!name || !address || !phone || currentState.cart.length === 0) {
+                // Usamos un alert temporal simple. En producción se usaría un modal.
+                console.error("Faltan datos o el carrito está vacío.");
+                return;
+            }
+
+            const orderData = {
+                restaurantId: currentState.activeRestaurant.id,
+                restaurantName: currentState.activeRestaurant.name,
+                customerName: name,
+                surname: surname,
+                phone: phone,
+                address: address,
+                items: JSON.parse(JSON.stringify(currentState.cart)), // Deep copy
+                total: currentState.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0),
+                status: 'Pendiente', // Pendiente, En Proceso, Entregado, Cancelado
+                timestamp: serverTimestamp(),
+            };
+
+            try {
+                // 1. Guardar el pedido en Firestore (público)
+                await addDoc(getPublicCollectionRef('orders'), orderData);
+                
+                // 2. Generar el link de WhatsApp y redirigir
+                const whatsappUrl = createWhatsAppOrderLink(currentState.activeRestaurant, orderData);
+
+                // Limpiar carrito y cerrar menú
+                currentState.cart = [];
+                closeMenu();
+                
+                // Redirigir al cliente a WhatsApp
+                window.open(whatsappUrl, '_blank');
+                
+            } catch (error) {
+                console.error("Error al realizar el pedido:", error);
+                // Usamos un alert temporal simple.
+                
+            }
+        };
+
+        // --- Lógica del Administrador ---
+        
+        const logoutAdmin = () => {
+             // Solo el admin "simulado" usa el logout para volver a la vista de cliente.
+            currentState.view = 'customer';
+            render();
+        }
+
+        const handleAdminLogin = async (e) => {
+            e.preventDefault();
+            // Nota: La lógica de autenticación real se maneja en onAuthStateChanged
+            // y depende del token inicial. Esto es solo un simulador de formulario.
+            
+            if (currentState.userId && currentState.isAuthReady) {
+                currentState.isAdmin = true;
+                currentState.view = 'admin';
+                setupFirestoreListeners(); // Volver a escuchar con permisos de admin
+                render();
+            } else {
+                 console.error("Acceso denegado o autenticación no resuelta.");
+                 // En un entorno de producción, aquí habría un manejo de error de credenciales
+            }
+        };
+
+        const handleCrudAction = async (collectionName, data, action, docId = null) => {
+            try {
+                if (action === 'add') {
+                    if (collectionName === 'products' && currentState.editingRestaurant) {
+                         // Agregar producto a un restaurante
+                        await addDoc(getPublicCollectionRef('products'), { ...data, restaurantId: currentState.editingRestaurant.id });
+                    } else if (collectionName === 'restaurants') {
+                        // Asegurar que el WhatsApp tenga formato de link si no se da
+                        if (!data.whatsapp.startsWith('+')) data.whatsapp = `+${data.whatsapp.replace(/[^0-9]/g, '')}`;
+
+                        await addDoc(getPublicCollectionRef('restaurants'), data);
+                    } else if (collectionName === 'motorizados') {
+                         await addDoc(getPrivateCollectionRef('motorizados'), data);
+                    } else if (collectionName === 'admin_users') {
+                        // Solo agregar el nombre/rol, el ID de Firebase es la clave.
+                        await addDoc(getPrivateCollectionRef('admin_users'), data);
+                    }
+                } else if (action === 'update' && docId) {
+                    if (collectionName === 'restaurants' && data.whatsapp && !data.whatsapp.startsWith('+')) data.whatsapp = `+${data.whatsapp.replace(/[^0-9]/g, '')}`;
+                    
+                    const ref = collectionName === 'products' || collectionName === 'restaurants'
+                        ? getPublicDocRef(collectionName, docId)
+                        : doc(db, `artifacts/${appId}/users/${currentState.userId}/${collectionName}`, docId);
+                    
+                    await updateDoc(ref, data);
+                } else if (action === 'delete' && docId) {
+                    const ref = collectionName === 'products' || collectionName === 'restaurants'
+                        ? getPublicDocRef(collectionName, docId)
+                        : doc(db, `artifacts/${appId}/users/${currentState.userId}/${collectionName}`, docId);
+                        
+                    await deleteDoc(ref);
+                }
+                
+                // Cerrar modals de edición después de la acción exitosa
+                currentState.editingProduct = null;
+                currentState.editingRestaurant = null;
+                currentState.editingMotorizado = null;
+                currentState.editingUser = null;
+                render(); // Forzar re-renderizado para actualizar la vista
+
+            } catch (error) {
+                console.error(`Error al ejecutar acción ${action} en ${collectionName}:`, error);
+                // Usamos console.error para mostrar el error al admin en el modo demo
+            }
+        };
+
+        const updateOrderStatus = async (orderId, newStatus) => {
+            try {
+                const orderRef = getPublicDocRef('orders', orderId);
+                await updateDoc(orderRef, { status: newStatus });
+            } catch (error) {
+                console.error("Error al actualizar estado del pedido:", error);
+            }
+        };
+
+
+        // =========================================================================
+        // 4. RENDERIZADO DE LA INTERFAZ
+        // =========================================================================
+
+        const render = () => {
+            const appDiv = document.getElementById('app');
+            let content = '';
+
+            // Mostrar el cargador si Firebase no está listo
+            if (!currentState.isAuthReady) {
+                appDiv.innerHTML = `
+                    <div class="flex items-center justify-center min-h-screen">
+                        <div class="animate-spin rounded-full h-32 w-32 border-b-2 border-red-500"></div>
+                        <p class="ml-4 text-xl text-gray-600">Cargando Bambam Delivery...</p>
+                        <p class="ml-4 text-sm text-gray-400 mt-2">ID Ambiente: ${appId}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            if (currentState.view === 'customer') {
+                content = renderCustomerView();
+            } else if (currentState.view === 'login') {
+                content = renderAdminLogin();
+            } else if (currentState.view === 'admin') {
+                content = renderAdminPanel();
+            }
+
+            appDiv.innerHTML = content;
+            
+            // Re-asignar eventos después de inyectar el HTML
+            attachEventListeners();
+        };
+
+        // ====================
+        // Vistas de Cliente
+        // ====================
+
+        const renderCustomerView = () => {
+            const restaurantsList = currentState.restaurants.length > 0
+                ? currentState.restaurants.map(rest => `
+                    <div class="card p-4 flex items-center space-x-4 cursor-pointer hover:shadow-lg transition duration-200" onclick="window.openMenu('${rest.id}')">
+                        <img src="${rest.logoUrl || 'https://placehold.co/80x80/ef4444/ffffff?text=Logo'}" onerror="this.onerror=null;this.src='https://placehold.co/80x80/ef4444/ffffff?text=Logo'" alt="Logo" class="w-20 h-20 rounded-lg object-cover">
+                        <div>
+                            <h3 class="text-xl font-bold text-gray-800">${rest.name}</h3>
+                            <p class="text-sm text-gray-500">${rest.description || '¡El mejor sabor!'}</p>
+                        </div>
+                    </div>
+                `).join('')
+                : '<p class="text-center text-gray-500 mt-8">No hay locales activos en este momento.</p>';
+
+            return `
+                <header class="bg-red-600 p-4 shadow-md">
+                    <div class="max-w-7xl mx-auto flex justify-between items-center">
+                        <h1 class="text-3xl font-extrabold text-white">BAMBAM DELIVERY</h1>
+                        <a href="https://wa.me/584128481584?text=Quiero%20registrar%20mi%20negocio%20en%20Bambam%20Delivery." target="_blank" class="bg-yellow-400 text-red-800 font-bold py-2 px-4 rounded-full hover:bg-yellow-300 transition duration-200 shadow-md">
+                            Quiero Registrar mi Negocio
+                        </a>
+                    </div>
+                </header>
+
+                <main class="max-w-7xl mx-auto p-4 flex-grow">
+                    <h2 class="text-2xl font-semibold mb-6 text-gray-800">Locales Activos Cerca de Ti</h2>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                        ${restaurantsList}
+                    </div>
+                </main>
+
+                <footer class="p-4 text-center border-t border-gray-200 bg-white">
+                    <button onclick="navigate('login')" class="text-sm text-red-600 hover:underline">
+                        Acceso Administrador (ID: ${currentState.userId})
+                    </button>
+                    <p class="text-xs text-gray-500 mt-2">© 2024 Bambam Delivery. Todos los derechos reservados.</p>
+                </footer>
+
+                ${currentState.activeRestaurant ? renderMenuModal() : ''}
+            `;
+        };
+
+        const renderMenuModal = () => {
+            const restaurant = currentState.activeRestaurant;
+            const restaurantProducts = currentState.products.filter(p => p.restaurantId === restaurant.id);
+            const subtotal = currentState.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+            const menuItems = restaurantProducts.length > 0
+                ? restaurantProducts.map(prod => `
+                    <div class="flex items-center space-x-4 border-b pb-4 mb-4">
+                        <img src="${prod.imageUrl || 'https://placehold.co/60x60/f87171/ffffff?text=Prod'}" onerror="this.onerror=null;this.src='https://placehold.co/60x60/f87171/ffffff?text=Prod'" alt="${prod.name}" class="w-16 h-16 rounded-md object-cover">
+                        <div class="flex-grow">
+                            <p class="font-semibold text-gray-800">${prod.name}</p>
+                            <p class="text-sm text-gray-600">$${prod.price.toFixed(2)}</p>
+                        </div>
+                        <button onclick="window.addToCart('${prod.id}', '${prod.name}', ${prod.price})" class="bg-red-500 text-white p-2 rounded-full text-xs font-bold hover:bg-red-600 transition duration-200">
+                            + Agregar
+                        </button>
+                    </div>
+                `).join('')
+                : '<p class="text-center text-gray-500">Este local aún no tiene productos registrados.</p>';
+            
+            // Carrito Modal/Drawer
+            const cartItems = currentState.cart.map(item => `
+                <div class="flex flex-col p-3 border-b border-gray-200">
+                    <div class="flex justify-between items-center mb-1">
+                        <p class="font-semibold">${item.name}</p>
+                        <p class="font-bold text-red-600">$${(item.price * item.quantity).toFixed(2)}</p>
+                    </div>
+                    
+                    <!-- Cantidad y Eliminar -->
+                    <div class="flex items-center justify-between mt-2">
+                        <div class="flex items-center space-x-2">
+                            <button onclick="window.updateCartItemQuantity('${item.id}', ${item.quantity - 1})" class="bg-gray-200 w-6 h-6 rounded-full text-gray-600 font-bold hover:bg-gray-300">-</button>
+                            <span class="font-medium">${item.quantity}</span>
+                            <button onclick="window.updateCartItemQuantity('${item.id}', ${item.quantity + 1})" class="bg-gray-200 w-6 h-6 rounded-full text-gray-600 font-bold hover:bg-gray-300">+</button>
+                        </div>
+                        <button onclick="window.updateCartItemQuantity('${item.id}', 0)" class="text-sm text-red-500 hover:text-red-700">
+                            Eliminar
+                        </button>
+                    </div>
+
+                    <!-- Observaciones -->
+                    <textarea 
+                        oninput="window.updateCartItemObservation('${item.id}', this.value)" 
+                        class="mt-2 p-1 text-xs border rounded w-full resize-none" 
+                        rows="1" 
+                        placeholder="Obs: sin tomate, extra picante..."
+                    >${item.observation}</textarea>
+                </div>
+            `).join('');
+
+            const cartSection = `
+                <div id="cart-drawer" class="fixed right-0 top-0 h-full w-full sm:w-96 bg-white z-50 transform translate-x-full transition-transform duration-300 shadow-2xl p-6 overflow-y-auto">
+                    <div class="flex justify-between items-center border-b pb-4 mb-4">
+                        <h3 class="text-2xl font-bold text-gray-800">Mi Pedido</h3>
+                        <button onclick="closeCart()" class="text-gray-500 hover:text-gray-800 text-3xl">&times;</button>
+                    </div>
+
+                    <div class="space-y-3 flex-grow overflow-y-auto max-h-96">
+                        ${currentState.cart.length > 0 ? cartItems : '<p class="text-center text-gray-500 py-10">Tu carrito está vacío.</p>'}
+                    </div>
+
+                    <div class="mt-4 pt-4 border-t border-gray-200 sticky bottom-0 bg-white">
+                        <div class="flex justify-between items-center mb-4">
+                            <p class="text-xl font-semibold">Total:</p>
+                            <p class="text-2xl font-bold text-red-600">$${subtotal.toFixed(2)}</p>
+                        </div>
+                        <button onclick="openOrderDetails()" ${currentState.cart.length === 0 ? 'disabled' : ''} class="w-full bg-green-500 text-white font-bold py-3 rounded-lg hover:bg-green-600 transition disabled:bg-gray-400">
+                            Confirmar Pedido (${currentState.cart.length} items)
+                        </button>
+                    </div>
+                </div>
+            `;
+
+            // Order Details Modal
+            const orderDetailsModal = `
+                <div id="order-details-modal" class="fixed inset-0 modal-overlay z-[60] hidden flex items-center justify-center p-4">
+                    <div class="card w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-2xl font-bold mb-4 border-b pb-2">Datos de Entrega</h3>
+                        <form id="order-form">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Nombre</label>
+                                <input type="text" name="name" required value="" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Apellido</label>
+                                <input type="text" name="surname" required value="" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Dirección Completa</label>
+                                <input type="text" name="address" required value="" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium text-gray-700">Teléfono (Ej: +58412...)</label>
+                                <input type="tel" name="phone" required value="" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+
+                            <p class="text-sm font-semibold text-red-600 mb-4 p-3 bg-red-50 rounded-lg">
+                                Al dar clic en "Realizar Pedido", se abrirá tu WhatsApp. *DEBES* enviar tu ubicación actual por GPS.
+                            </p>
+                            
+                            <div class="flex justify-between space-x-3">
+                                <button type="button" onclick="closeOrderDetails()" class="w-full bg-gray-300 text-gray-800 font-bold py-2 rounded-lg hover:bg-gray-400 transition">
+                                    Volver al Carrito
+                                </button>
+                                <button type="submit" class="w-full bg-red-600 text-white font-bold py-2 rounded-lg hover:bg-red-700 transition">
+                                    Realizar Pedido ($${subtotal.toFixed(2)})
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+
+            // Main Menu Modal
+            return `
+                <div id="menu-modal" class="fixed inset-0 modal-overlay z-40 flex items-center justify-center p-4">
+                    <div class="card w-full max-w-3xl h-[90vh] flex flex-col">
+                        <!-- Header del Modal -->
+                        <div class="p-6 flex justify-between items-start border-b">
+                            <div>
+                                <h2 class="text-3xl font-bold text-red-600">${restaurant.name}</h2>
+                                <p class="text-gray-500">${restaurant.description}</p>
+                            </div>
+                            <button onclick="closeMenu()" class="text-gray-500 hover:text-gray-800 text-4xl leading-none">&times;</button>
+                        </div>
+                        
+                        <!-- Contenido y Carrito -->
+                        <div class="flex-grow p-6 overflow-y-auto">
+                            <h3 class="text-2xl font-semibold mb-4">Menú Completo</h3>
+                            <div class="space-y-4">
+                                ${menuItems}
+                            </div>
+                        </div>
+
+                        <!-- Footer/Boton de Carrito -->
+                        <div class="p-4 border-t sticky bottom-0 bg-white">
+                            <button onclick="openCart()" ${currentState.cart.length === 0 ? 'disabled' : ''} class="w-full bg-red-600 text-white font-bold py-3 rounded-lg hover:bg-red-700 transition disabled:bg-gray-400">
+                                Ver Carrito (${currentState.cart.length} items) - $${subtotal.toFixed(2)}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                ${cartSection}
+                ${orderDetailsModal}
+            `;
+        };
+
+        // ====================
+        // Vistas de Admin
+        // ====================
+
+        const renderAdminLogin = () => {
+            return `
+                <main class="flex items-center justify-center min-h-screen bg-gray-100 p-4">
+                    <div class="card w-full max-w-md p-8">
+                        <h2 class="text-3xl font-bold text-red-600 mb-6 text-center">Acceso Administrador</h2>
+                        <form id="admin-login-form">
+                            <div class="mb-4">
+                                <label for="email" class="block text-sm font-medium text-gray-700">Usuario (Email - Ficticio)</label>
+                                <input type="email" id="email" name="email" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 border">
+                            </div>
+                            <div class="mb-6">
+                                <label for="password" class="block text-sm font-medium text-gray-700">Contraseña (Ficticia)</label>
+                                <input type="password" id="password" name="password" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-3 border">
+                            </div>
+                            <button type="submit" class="btn-primary w-full py-3">
+                                Iniciar Sesión
+                            </button>
+                        </form>
+                        <button onclick="navigate('customer')" class="mt-4 w-full text-sm text-gray-500 hover:underline">
+                            Volver al Inicio
+                        </button>
+                    </div>
+                </main>
+            `;
+        };
+
+        const renderAdminPanel = () => {
+            if (!currentState.isAdmin) {
+                // Si el usuario llega aquí pero no es el admin, lo regresamos al login
+                navigate('login');
+                return '';
+            }
+            
+            let adminContent = '';
+            switch (currentState.adminSection) {
+                case 'restaurants':
+                    adminContent = renderRestaurantManagement();
+                    break;
+                case 'products':
+                    adminContent = renderProductManagement();
+                    break;
+                case 'orders':
+                    adminContent = renderOrderManagement();
+                    break;
+                case 'motorizados':
+                    adminContent = renderMotorizadoManagement();
+                    break;
+                case 'users':
+                    adminContent = renderUserManagement();
+                    break;
+                case 'history':
+                    adminContent = renderOrderHistory();
+                    break;
+            }
+
+            return `
+                <div class="flex min-h-screen">
+                    <!-- Sidebar -->
+                    <aside class="admin-sidebar w-64 p-6 flex flex-col">
+                        <h2 class="text-3xl font-extrabold mb-8 text-yellow-400">ADMIN BAMBAM</h2>
+                        <div class="space-y-2 flex-grow">
+                            <button onclick="changeAdminSection('restaurants')" class="admin-nav-item ${currentState.adminSection === 'restaurants' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                🍔 Gestión de Locales
+                            </button>
+                            <button onclick="changeAdminSection('products')" class="admin-nav-item ${currentState.adminSection === 'products' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                🍕 Gestión de Productos
+                            </button>
+                            <button onclick="changeAdminSection('orders')" class="admin-nav-item ${currentState.adminSection === 'orders' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                📦 Pedidos en Proceso
+                            </button>
+                            <button onclick="changeAdminSection('history')" class="admin-nav-item ${currentState.adminSection === 'history' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                📋 Historial de Pedidos
+                            </button>
+                            <button onclick="changeAdminSection('motorizados')" class="admin-nav-item ${currentState.adminSection === 'motorizados' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                🛵 Motorizados
+                            </button>
+                            <button onclick="changeAdminSection('users')" class="admin-nav-item ${currentState.adminSection === 'users' ? 'active' : ''} w-full text-left p-3 rounded-lg hover:bg-gray-700">
+                                👥 Gestión de Usuarios
+                            </button>
+                        </div>
+                        <div class="mt-8 pt-4 border-t border-gray-700">
+                            <p class="text-xs text-gray-400 mb-2">ID Usuario: ${currentState.userId}</p>
+                            <button onclick="logoutAdmin()" class="w-full bg-red-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-red-700 transition">
+                                Cerrar Sesión
+                            </button>
+                        </div>
+                    </aside>
+                    <!-- Contenido Principal -->
+                    <main class="flex-grow p-8 bg-gray-50">
+                        ${adminContent}
+                    </main>
+                </div>
+                ${renderAdminModals()}
+            `;
+        };
+
+        // --- Sub-secciones del Admin ---
+
+        const renderRestaurantManagement = () => {
+            const list = currentState.restaurants.map(rest => `
+                <div class="card p-4 flex justify-between items-center mb-3">
+                    <div>
+                        <p class="font-bold text-lg">${rest.name}</p>
+                        <p class="text-sm text-gray-600">WhatsApp: ${rest.whatsapp}</p>
+                        <p class="text-xs text-gray-400">ID: ${rest.id}</p>
+                    </div>
+                    <div class="space-x-2">
+                        <button onclick="openEditRestaurantModal('${rest.id}')" class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 text-sm">Editar</button>
+                        <button onclick="openProductManagementForRestaurant('${rest.id}')" class="bg-green-500 text-white p-2 rounded-md hover:bg-green-600 text-sm">Ver Productos</button>
+                        <button onclick="handleDeleteRestaurant('${rest.id}', '${rest.name}')" class="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 text-sm">Eliminar</button>
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-bold mb-6">Gestión de Locales</h1>
+                <button onclick="openAddRestaurantModal()" class="btn-primary mb-6">
+                    + Agregar Nuevo Local
+                </button>
+                <div class="space-y-4">
+                    ${list.length > 0 ? list : '<p class="text-gray-500">No hay locales registrados.</p>'}
+                </div>
+            `;
+        };
+        
+        // Función auxiliar para eliminar local con confirmación (usando console.log en lugar de alert/confirm)
+        window.handleDeleteRestaurant = (id, name) => {
+            console.log(`Intentando eliminar el local: ${name} (ID: ${id})...`);
+            if (confirm(`¿Seguro que quieres eliminar el local "${name}"? Esto también eliminará sus productos asociados.`)) {
+                handleCrudAction('restaurants', null, 'delete', id);
+                // También deberías buscar y eliminar todos los productos con restaurantId = id en un app real.
+                console.log("Local eliminado. (Nota: La eliminación de productos asociados debe hacerse manualmente en esta demo)");
+            }
+        };
+
+
+        const renderProductManagement = () => {
+            const restaurant = currentState.editingRestaurant;
+            
+            if (!restaurant) {
+                // Lista de restaurantes para elegir
+                const list = currentState.restaurants.map(rest => `
+                    <button onclick="openProductManagementForRestaurant('${rest.id}')" class="card p-4 text-left w-full hover:bg-gray-100 transition mb-3">
+                        <p class="font-bold text-xl">${rest.name}</p>
+                        <p class="text-sm text-gray-500">Haz clic para gestionar su menú.</p>
+                    </button>
+                `).join('');
+
+                return `
+                    <h1 class="text-3xl font-bold mb-6">Selecciona un Local para Gestionar sus Productos</h1>
+                    <div class="space-y-4 max-w-lg">
+                        ${list.length > 0 ? list : '<p class="text-gray-500">No hay locales registrados para gestionar productos.</p>'}
+                    </div>
+                `;
+            }
+
+            // Gestión de productos para el restaurante seleccionado
+            const productsList = currentState.products
+                .filter(p => p.restaurantId === restaurant.id)
+                .map(prod => `
+                    <div class="card p-4 flex justify-between items-center mb-3">
+                        <div class="flex items-center space-x-3">
+                            <img src="${prod.imageUrl || 'https://placehold.co/40x40/f87171/ffffff?text=P'}" onerror="this.onerror=null;this.src='https://placehold.co/40x40/f87171/ffffff?text=P'" class="w-10 h-10 rounded-full object-cover">
+                            <div>
+                                <p class="font-bold">${prod.name}</p>
+                                <p class="text-sm text-gray-600">$${prod.price.toFixed(2)}</p>
+                            </div>
+                        </div>
+                        <div class="space-x-2">
+                            <button onclick="openEditProductModal('${prod.id}')" class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 text-sm">Editar</button>
+                            <button onclick="if(confirm('¿Seguro que quieres eliminar ${prod.name}?')) handleCrudAction('products', null, 'delete', '${prod.id}')" class="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 text-sm">Eliminar</button>
+                        </div>
+                    </div>
+                `).join('');
+
+            return `
+                <div class="flex justify-between items-center mb-6 border-b pb-4">
+                    <h1 class="text-3xl font-bold">Menú de ${restaurant.name}</h1>
+                    <button onclick="closeProductManagement()" class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400">
+                        Cambiar Local
+                    </button>
+                </div>
+                <button onclick="openAddProductModal()" class="btn-primary mb-6">
+                    + Agregar Nuevo Producto
+                </button>
+                <div class="space-y-4">
+                    ${productsList.length > 0 ? productsList : '<p class="text-gray-500">Este local no tiene productos registrados.</p>'}
+                </div>
+            `;
+        };
+
+        const renderOrderManagement = () => {
+            // Pedidos en proceso (Pendiente, En Proceso)
+            const activeOrders = currentState.orders.filter(o => o.status === 'Pendiente' || o.status === 'En Proceso');
+
+            const orderList = activeOrders.map(order => `
+                <div class="card p-4 mb-4 border-l-4 ${order.status === 'Pendiente' ? 'border-yellow-500' : 'border-blue-500'}">
+                    <div class="flex justify-between items-start mb-2">
+                        <div>
+                            <p class="font-bold text-xl">${order.restaurantName}</p>
+                            <p class="text-sm text-gray-700">Cliente: ${order.customerName} ${order.surname}</p>
+                            <p class="text-xs text-gray-500">Dir: ${order.address} | Tel: ${order.phone}</p>
+                        </div>
+                        <span class="px-3 py-1 rounded-full text-xs font-semibold ${order.status === 'Pendiente' ? 'bg-yellow-100 text-yellow-800' : 'bg-blue-100 text-blue-800'}">
+                            ${order.status}
+                        </span>
+                    </div>
+
+                    <p class="text-lg font-bold text-red-600 mb-2">Total: $${order.total.toFixed(2)}</p>
+                    <ul class="text-sm text-gray-600 mb-4 list-disc pl-5">
+                        ${order.items.map(item => `<li>${item.quantity}x ${item.name} ${item.observation ? `(Obs: ${item.observation})` : ''}</li>`).join('')}
+                    </ul>
+
+                    <div class="flex space-x-2 mt-2">
+                        <button onclick="updateOrderStatus('${order.id}', 'En Proceso')" ${order.status === 'En Proceso' ? 'disabled' : ''} class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 text-sm disabled:bg-gray-400">
+                            Marcar En Proceso
+                        </button>
+                        <button onclick="updateOrderStatus('${order.id}', 'Entregado')" class="bg-green-500 text-white p-2 rounded-md hover:bg-green-600 text-sm">
+                            Marcar Entregado
+                        </button>
+                        <button onclick="updateOrderStatus('${order.id}', 'Cancelado')" class="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 text-sm">
+                            Cancelar
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-bold mb-6">📦 Pedidos en Proceso (${activeOrders.length})</h1>
+                <div class="space-y-4">
+                    ${orderList.length > 0 ? orderList : '<p class="text-gray-500">No hay pedidos pendientes o en proceso.</p>'}
+                </div>
+            `;
+        };
+
+        const renderOrderHistory = () => {
+            // Pedidos finalizados (Entregado, Cancelado)
+            const finalOrders = currentState.orders.filter(o => o.status === 'Entregado' || o.status === 'Cancelado');
+
+            const historyList = finalOrders.map(order => `
+                <div class="card p-4 mb-4 ${order.status === 'Entregado' ? 'bg-green-50' : 'bg-red-50'}">
+                    <div class="flex justify-between items-start mb-2">
+                        <div>
+                            <p class="font-bold text-lg">${order.restaurantName} - ${order.customerName}</p>
+                            <p class="text-xs text-gray-500">Fecha: ${order.timestamp ? new Date(order.timestamp.toDate()).toLocaleString() : 'N/A'}</p>
+                        </div>
+                        <span class="px-3 py-1 rounded-full text-xs font-semibold ${order.status === 'Entregado' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}">
+                            ${order.status}
+                        </span>
+                    </div>
+                    <p class="text-lg font-bold text-gray-800">Total: $${order.total.toFixed(2)}</p>
+                </div>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-bold mb-6">📋 Historial de Pedidos (${finalOrders.length})</h1>
+                <div class="space-y-4">
+                    ${historyList.length > 0 ? historyList : '<p class="text-gray-500">No hay pedidos finalizados.</p>'}
+                </div>
+            `;
+        };
+        
+        const renderMotorizadoManagement = () => {
+            const list = currentState.motorizados.map(moto => `
+                <div class="card p-4 flex justify-between items-center mb-3">
+                    <div>
+                        <p class="font-bold text-lg">${moto.name} ${moto.surname}</p>
+                        <p class="text-sm text-gray-600">Tel: ${moto.phone} | Placa: ${moto.plate} (${moto.model})</p>
+                        <p class="text-xs text-gray-400">Cédula: ${moto.cedula}</p>
+                    </div>
+                    <div class="space-x-2">
+                        <button onclick="openEditMotorizadoModal('${moto.id}')" class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 text-sm">Editar</button>
+                        <button onclick="if(confirm('¿Seguro que quieres eliminar a ${moto.name}?')) handleCrudAction('motorizados', null, 'delete', '${moto.id}')" class="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 text-sm">Eliminar</button>
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-bold mb-6">🛵 Gestión de Motorizados Activos</h1>
+                <button onclick="openAddMotorizadoModal()" class="btn-primary mb-6">
+                    + Agregar Nuevo Motorizado
+                </button>
+                <div class="space-y-4">
+                    ${list.length > 0 ? list : '<p class="text-gray-500">No hay motorizados registrados.</p>'}
+                </div>
+            `;
+        };
+
+        const renderUserManagement = () => {
+            const list = currentState.adminUsers.map(user => `
+                <div class="card p-4 flex justify-between items-center mb-3">
+                    <div>
+                        <p class="font-bold text-lg">${user.name}</p>
+                        <p class="text-sm text-gray-600">Rol: ${user.role}</p>
+                        <p class="text-xs text-gray-400">Email: ${user.email}</p>
+                    </div>
+                    <div class="space-x-2">
+                        <button onclick="openEditUserModal('${user.id}')" class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 text-sm">Editar</button>
+                        <button onclick="if(confirm('¿Seguro que quieres eliminar a ${user.name}?')) handleCrudAction('admin_users', null, 'delete', '${user.id}')" class="bg-red-500 text-white p-2 rounded-md hover:bg-red-600 text-sm">Eliminar</button>
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-bold mb-6">👥 Gestión de Usuarios (Soporte/Supervisores)</h1>
+                <button onclick="openAddUserModal()" class="btn-primary mb-6">
+                    + Agregar Nuevo Usuario
+                </button>
+                <div class="space-y-4">
+                    ${list.length > 0 ? list : '<p class="text-gray-500">No hay usuarios de soporte registrados.</p>'}
+                </div>
+            `;
+        };
+
+
+        // ====================
+        // Modals de Admin
+        // ====================
+
+        const renderAdminModals = () => {
+            const restaurantModal = currentState.editingRestaurant ? `
+                <div id="restaurant-modal" class="fixed inset-0 modal-overlay z-50 flex items-center justify-center p-4">
+                    <div class="card w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-2xl font-bold mb-4 border-b pb-2">${currentState.editingRestaurant.id ? 'Editar' : 'Agregar'} Local</h3>
+                        <form id="restaurant-form">
+                            <input type="hidden" name="id" value="${currentState.editingRestaurant.id || ''}">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Nombre del Local</label>
+                                <input type="text" name="name" required value="${currentState.editingRestaurant.name || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Descripción</label>
+                                <input type="text" name="description" value="${currentState.editingRestaurant.description || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">URL Logo/Imagen</label>
+                                <input type="url" name="logoUrl" value="${currentState.editingRestaurant.logoUrl || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium text-gray-700">WhatsApp para Pedidos (Ej: +58412...)</label>
+                                <input type="text" name="whatsapp" required value="${currentState.editingRestaurant.whatsapp || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+
+                            <div class="flex justify-end space-x-3">
+                                <button type="button" onclick="closeAdminModal('restaurant')" class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" class="btn-primary py-2 px-4">
+                                    Guardar Local
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            ` : '';
+            
+            const productModal = currentState.editingProduct ? `
+                <div id="product-modal" class="fixed inset-0 modal-overlay z-50 flex items-center justify-center p-4">
+                    <div class="card w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-2xl font-bold mb-4 border-b pb-2">${currentState.editingProduct.id ? 'Editar' : 'Agregar'} Producto</h3>
+                        <p class="text-sm mb-4 text-gray-600">Local: ${currentState.editingRestaurant.name}</p>
+                        <form id="product-form">
+                            <input type="hidden" name="id" value="${currentState.editingProduct.id || ''}">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Nombre del Producto</label>
+                                <input type="text" name="name" required value="${currentState.editingProduct.name || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Precio ($)</label>
+                                <input type="number" step="0.01" name="price" required value="${currentState.editingProduct.price || 0}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium text-gray-700">URL Imagen del Producto</label>
+                                <input type="url" name="imageUrl" value="${currentState.editingProduct.imageUrl || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+
+                            <div class="flex justify-end space-x-3">
+                                <button type="button" onclick="closeAdminModal('product')" class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" class="btn-primary py-2 px-4">
+                                    Guardar Producto
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            ` : '';
+            
+            const motorizadoModal = currentState.editingMotorizado ? `
+                <div id="motorizado-modal" class="fixed inset-0 modal-overlay z-50 flex items-center justify-center p-4">
+                    <div class="card w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-2xl font-bold mb-4 border-b pb-2">${currentState.editingMotorizado.id ? 'Editar' : 'Agregar'} Motorizado</h3>
+                        <form id="motorizado-form">
+                            <input type="hidden" name="id" value="${currentState.editingMotorizado.id || ''}">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Nombre</label>
+                                <input type="text" name="name" required value="${currentState.editingMotorizado.name || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Apellido</label>
+                                <input type="text" name="surname" required value="${currentState.editingMotorizado.surname || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Teléfono</label>
+                                <input type="tel" name="phone" required value="${currentState.editingMotorizado.phone || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Cédula</label>
+                                <input type="text" name="cedula" required value="${currentState.editingMotorizado.cedula || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Placa de la Moto</label>
+                                <input type="text" name="plate" required value="${currentState.editingMotorizado.plate || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium text-gray-700">Modelo de la Moto</label>
+                                <input type="text" name="model" required value="${currentState.editingMotorizado.model || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+
+                            <div class="flex justify-end space-x-3">
+                                <button type="button" onclick="closeAdminModal('motorizado')" class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" class="btn-primary py-2 px-4">
+                                    Guardar Motorizado
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            ` : '';
+
+            const userModal = currentState.editingUser ? `
+                <div id="user-modal" class="fixed inset-0 modal-overlay z-50 flex items-center justify-center p-4">
+                    <div class="card w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 class="text-2xl font-bold mb-4 border-b pb-2">${currentState.editingUser.id ? 'Editar' : 'Agregar'} Usuario de Soporte</h3>
+                        <form id="user-form">
+                            <input type="hidden" name="id" value="${currentState.editingUser.id || ''}">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Nombre</label>
+                                <input type="text" name="name" required value="${currentState.editingUser.name || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700">Email (Sólo para referencia)</label>
+                                <input type="email" name="email" required value="${currentState.editingUser.email || ''}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                            </div>
+                            <div class="mb-6">
+                                <label class="block text-sm font-medium text-gray-700">Rol</label>
+                                <select name="role" required class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border">
+                                    <option value="Soporte" ${currentState.editingUser.role === 'Soporte' ? 'selected' : ''}>Soporte</option>
+                                    <option value="Supervisor" ${currentState.editingUser.role === 'Supervisor' ? 'selected' : ''}>Supervisor de Zona</option>
+                                </select>
+                            </div>
+
+                            <div class="flex justify-end space-x-3">
+                                <button type="button" onclick="closeAdminModal('user')" class="bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg hover:bg-gray-400 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" class="btn-primary py-2 px-4">
+                                    Guardar Usuario
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            ` : '';
+
+
+            return restaurantModal + productModal + motorizadoModal + userModal;
+        };
+
+
+        // =========================================================================
+        // 5. MANEJO DE EVENTOS
+        // =========================================================================
+
+        const attachEventListeners = () => {
+            // Cliente - Eventos del Carrito/Menú
+            window.openMenu = (restaurantId) => openMenu(currentState.restaurants.find(r => r.id === restaurantId));
+            window.closeMenu = closeMenu;
+            window.openCart = () => {
+                const cartDrawer = document.getElementById('cart-drawer');
+                if (cartDrawer) cartDrawer.classList.remove('translate-x-full');
+            };
+            window.closeCart = () => {
+                const cartDrawer = document.getElementById('cart-drawer');
+                if (cartDrawer) cartDrawer.classList.add('translate-x-full');
+                closeOrderDetails(); // Cerrar detalles si estaban abiertos
+            };
+            window.openOrderDetails = () => {
+                window.closeCart(); // Cerrar drawer del carrito
+                const modal = document.getElementById('order-details-modal');
+                if (modal) modal.classList.remove('hidden');
+            };
+            window.closeOrderDetails = () => {
+                const modal = document.getElementById('order-details-modal');
+                if (modal) modal.classList.add('hidden');
+            };
+
+            window.addToCart = (id, name, price) => {
+                addToCart({ id, name, price, restaurantId: currentState.activeRestaurant.id });
+                window.openCart(); // Abrir carrito automáticamente
+            };
+
+            window.updateCartItemQuantity = (id, quantity) => {
+                const item = currentState.cart.find(i => i.id === id);
+                if (item) updateCartItem(id, quantity);
+            };
+
+            window.updateCartItemObservation = (id, observation) => {
+                const item = currentState.cart.find(i => i.id === id);
+                if (item) updateCartItem(id, item.quantity, observation);
+            };
+            
+            // Evento para el formulario de pedido
+            const orderForm = document.getElementById('order-form');
+            if (orderForm) orderForm.onsubmit = submitOrder;
+
+            // Admin - Login
+            const adminLoginForm = document.getElementById('admin-login-form');
+            if (adminLoginForm) adminLoginForm.onsubmit = handleAdminLogin;
+            
+            // Admin - CRUD Genérico
+            window.handleCrudAction = handleCrudAction;
+            window.updateOrderStatus = updateOrderStatus;
+
+            // Admin - CRUD Restaurantes
+            window.openAddRestaurantModal = () => currentState.editingRestaurant = {};
+            window.openEditRestaurantModal = (id) => currentState.editingRestaurant = currentState.restaurants.find(r => r.id === id);
+            const restaurantForm = document.getElementById('restaurant-form');
+            if (restaurantForm) restaurantForm.onsubmit = (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const data = {
+                    name: form.name.value,
+                    description: form.description.value,
+                    logoUrl: form.logoUrl.value,
+                    whatsapp: form.whatsapp.value
+                };
+                const id = form.id.value;
+                handleCrudAction('restaurants', data, id ? 'update' : 'add', id || null);
+            };
+
+            // Admin - CRUD Productos
+            window.openProductManagementForRestaurant = (restaurantId) => {
+                currentState.editingRestaurant = currentState.restaurants.find(r => r.id === restaurantId);
+                changeAdminSection('products'); // Forzar re-render con la sección de productos
+            };
+            window.closeProductManagement = () => currentState.editingRestaurant = null;
+
+            window.openAddProductModal = () => currentState.editingProduct = {};
+            window.openEditProductModal = (id) => currentState.editingProduct = currentState.products.find(p => p.id === id);
+            const productForm = document.getElementById('product-form');
+            if (productForm) productForm.onsubmit = (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const data = {
+                    name: form.name.value,
+                    price: parseFloat(form.price.value),
+                    imageUrl: form.imageUrl.value,
+                };
+                const id = form.id.value;
+                handleCrudAction('products', data, id ? 'update' : 'add', id || null);
+            };
+
+            // Admin - CRUD Motorizados
+            window.openAddMotorizadoModal = () => currentState.editingMotorizado = {};
+            window.openEditMotorizadoModal = (id) => currentState.editingMotorizado = currentState.motorizados.find(m => m.id === id);
+            const motorizadoForm = document.getElementById('motorizado-form');
+            if (motorizadoForm) motorizadoForm.onsubmit = (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const data = {
+                    name: form.name.value,
+                    surname: form.surname.value,
+                    phone: form.phone.value,
+                    cedula: form.cedula.value,
+                    plate: form.plate.value,
+                    model: form.model.value,
+                };
+                const id = form.id.value;
+                handleCrudAction('motorizados', data, id ? 'update' : 'add', id || null);
+            };
+            
+            // Admin - CRUD Usuarios
+            window.openAddUserModal = () => currentState.editingUser = {};
+            window.openEditUserModal = (id) => currentState.editingUser = currentState.adminUsers.find(u => u.id === id);
+            const userForm = document.getElementById('user-form');
+            if (userForm) userForm.onsubmit = (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const data = {
+                    name: form.name.value,
+                    email: form.email.value,
+                    role: form.role.value,
+                };
+                const id = form.id.value;
+                handleCrudAction('admin_users', data, id ? 'update' : 'add', id || null);
+            };
+
+
+            window.closeAdminModal = (type) => {
+                if (type === 'restaurant') currentState.editingRestaurant = null;
+                else if (type === 'product') currentState.editingProduct = null;
+                else if (type === 'motorizado') currentState.editingMotorizado = null;
+                else if (type === 'user') currentState.editingUser = null;
+                render();
+            };
+        };
+
+
+        // Iniciar la aplicación: Primero renderizar el estado inicial (cargando), luego autenticar.
+        render(); // Muestra el spinner de carga inmediatamente.
+        initializeAuth();
+    </script>
+</body>
+</html>

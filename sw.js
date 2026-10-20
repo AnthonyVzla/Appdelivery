@@ -1,18 +1,34 @@
-const CACHE_NAME = "a-un-paso-v1";
+const BUILD_VERSION = "__BUILD_VERSION__";
+const CACHE_PREFIX = "a-un-paso-";
+const CACHE_NAME = `${CACHE_PREFIX}${BUILD_VERSION}`;
 const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest", "./images%20(1).png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await Promise.all(APP_SHELL.map(async (path) => {
+      const url = new URL(path, self.location).href;
+      const versionedUrl = new URL(url);
+      versionedUrl.searchParams.set("sw-version", BUILD_VERSION);
+      const response = await fetch(new Request(versionedUrl, { cache: "reload" }));
+      if (!response.ok) throw new Error(`No se pudo precargar ${path}: ${response.status}`);
+      await cache.put(url, response);
+    }));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil(caches.keys()
+    .then((keys) => Promise.all(keys.filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME).map((key) => caches.delete(key))))
+    .then(() => self.clients.claim()));
 });
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
-  event.respondWith(fetch(request).then((response) => {
+  const freshRequest = new Request(request, { cache: "no-cache" });
+  event.respondWith(fetch(freshRequest).then((response) => {
     if (response.ok) {
       const copy = response.clone();
       caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));

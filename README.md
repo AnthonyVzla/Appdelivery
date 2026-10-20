@@ -4,7 +4,7 @@ PWA de gestión de pedidos para motorizados, soporte y administración. La aplic
 
 ## Configuración de Supabase
 
-1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`.
+1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`. Al desplegar una versión nueva del esquema, puedes volver a ejecutar el archivo: agrega de forma idempotente la función de creación con asignación opcional y el nombre histórico del creador.
 2. En **Authentication → Providers → Email**, desactiva **Confirm email** antes de registrar usuarios. La interfaz pide usuario y contraseña, no correo: internamente utiliza un alias técnico `usuario@users.aunpaso.local` para el proveedor de contraseña de Supabase.
 3. Registra la cuenta que será la primera administradora. En SQL Editor, asígnale el rol:
 
@@ -21,7 +21,7 @@ La URL del proyecto y la clave `anon`/publishable son públicas por diseño y es
 
 ## Publicar en GitHub Pages
 
-El workflow `.github/workflows/deploy.yml` publica la raíz del repositorio al hacer push a `main`. En GitHub, abre **Settings → Pages** y selecciona **GitHub Actions** como origen. También puedes publicar manualmente la raíz del repositorio desde Pages si no deseas usar el workflow.
+El workflow `.github/workflows/deploy.yml` publica la raíz del repositorio al hacer push a `main`. En GitHub, abre **Settings → Pages** y selecciona **GitHub Actions** como origen. Usa este workflow para que cada despliegue marque el service worker con una versión única. Si publicas manualmente, cambia `BUILD_VERSION` en `sw.js` en cada publicación.
 
 Para probar localmente, sirve esta carpeta con un servidor HTTP local; abrir `index.html` directamente como `file://` no permite instalar el service worker ni cargar correctamente los módulos.
 
@@ -35,7 +35,11 @@ Para probar localmente, sirve esta carpeta con un servidor HTTP local; abrir `in
 - Exportación del reporte de entregas en formato Excel XML `.xls`.
 - Diseño adaptable, manifest y service worker instalable.
 
-Los cambios de pedidos y disponibilidad se reflejan mediante Supabase Realtime, con actualización periódica de respaldo mientras la sesión está abierta.
+Los cambios de pedidos y disponibilidad se reflejan mediante Supabase Realtime, con actualización periódica de respaldo mientras la sesión está abierta. Al crear un pedido, soporte puede asignar opcionalmente un motorizado que esté activo; la base de datos valida su disponibilidad y asigna el pedido de forma privada. El creador del pedido queda guardado como una copia histórica y aparece en comandas e informes.
+
+## Actualizaciones automáticas instaladas
+
+En cada despliegue de GitHub Actions se marca el service worker con el commit publicado y se precargan los archivos de esa versión evitando respuestas antiguas de la caché HTTP. Las PWA abiertas comprueban actualizaciones al cargarse, al volver a primer plano y cada 30 minutos. Cuando la nueva versión toma control, la página se recarga automáticamente; si soporte está escribiendo un pedido, espera a que lo envíe o salga del formulario antes de recargar. La actualización requiere conexión a internet y que GitHub Pages haya terminado el despliegue. El navegador puede tardar un poco en detectar un despliegue mientras la app está cerrada; al abrir o traer la PWA a primer plano vuelve a comprobarlo.
 
 La PWA no bloquea las herramientas de desarrollo del navegador: eso no protege el código ni los datos, que deben protegerse en Supabase con Auth, RLS y validación de permisos. Las actualizaciones en segundo plano no reemplazan el formulario de creación mientras está abierto, para evitar perder lo que se está escribiendo.
 

@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, realtime: null, alertsEnabled: false, audioContext: null, notifiedOrders: new Set() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, audioContext: null, notifiedOrders: new Set() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -40,6 +40,7 @@ function usernameEmail(username) {
 }
 
 async function boot() {
+  setupServiceWorkerUpdates();
   const { data, error } = await supabase.auth.getSession();
   if (error) return reportError(error);
   if (data.session) {
@@ -56,9 +57,51 @@ async function boot() {
       renderAuth();
     }
   });
-  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-    navigator.serviceWorker.register("./sw.js").catch((error) => console.error("No se pudo registrar el service worker:", error));
-  }
+}
+
+function setupServiceWorkerUpdates() {
+  if (!("serviceWorker" in navigator) || !location.protocol.startsWith("http")) return;
+
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (state.reloadingForUpdate) return;
+    if (state.screen === "crear" && hasUnsavedFormData()) {
+      state.updatePending = true;
+      showToast("Nueva versión lista. Se actualizará al terminar o salir del formulario.");
+      return;
+    }
+    reloadForServiceWorkerUpdate();
+  });
+
+  navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+    state.serviceWorkerRegistration = registration;
+    return registration.update();
+  }).catch((error) => console.error("No se pudo registrar o comprobar el service worker:", error));
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkServiceWorkerUpdate();
+  });
+  state.updateCheckTimer = setInterval(checkServiceWorkerUpdate, 30 * 60 * 1000);
+}
+
+function checkServiceWorkerUpdate() {
+  if (!state.serviceWorkerRegistration) return;
+  state.serviceWorkerRegistration.update().catch((error) => {
+    console.error("No se pudo comprobar si hay una versión nueva:", error);
+  });
+}
+
+function hasUnsavedFormData() {
+  return [...app.querySelectorAll("form input, form textarea, form select")]
+    .some((field) => field.value.trim() !== "");
+}
+
+function reloadForServiceWorkerUpdate() {
+  state.reloadingForUpdate = true;
+  location.reload();
+}
+
+function applyPendingServiceWorkerUpdate() {
+  if (state.updatePending) reloadForServiceWorkerUpdate();
 }
 
 async function loadProfile() {
@@ -97,9 +140,7 @@ async function loadProfile() {
 function renderIfSafe() {
   if (state.screen === "crear") return;
   if (app.querySelector("input:focus, textarea:focus, select:focus")) return;
-  const hasUnsavedFormData = [...app.querySelectorAll("form input, form textarea, form select")]
-    .some((field) => field.value.trim() !== "");
-  if (!hasUnsavedFormData) renderApp();
+  if (!hasUnsavedFormData()) renderApp();
 }
 
 function startRealtime() {
@@ -238,7 +279,35 @@ async function refreshData(quiet) {
     }
     state.allies = allyResult.data || [];
     state.profiles = profileResult.data || [];
+    refreshActiveCourierOptions();
   }
+}
+
+function activeCouriers() {
+  const activeAfter = Date.now() - 90000;
+  return state.profiles.filter((profile) =>
+    profile.role === "motorizado"
+    && profile.approved
+    && !profile.suspended
+    && profile.online
+    && profile.last_seen_at
+    && new Date(profile.last_seen_at).getTime() > activeAfter
+  );
+}
+
+function refreshActiveCourierOptions() {
+  const select = document.querySelector("#assigned-courier");
+  if (!select) return;
+  const selectedId = select.value;
+  const couriers = activeCouriers();
+  const selectedIsActive = couriers.some((profile) => profile.id === selectedId);
+  const staleSelection = selectedId && !selectedIsActive
+    ? state.profiles.find((profile) => profile.id === selectedId)
+    : null;
+  select.innerHTML = `<option value="">Ninguno — pedido visible para motorizados activos</option>${staleSelection
+    ? `<option value="${staleSelection.id}">⚠ ${escapeHtml(staleSelection.full_name)} ya no está activo</option>`
+    : ""}${couriers.map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)} (@${escapeHtml(profile.username)})</option>`).join("")}`;
+  if (selectedId) select.value = selectedId;
 }
 
 const navItems = {
@@ -269,6 +338,7 @@ function renderApp() {
   app.querySelectorAll("[data-screen]").forEach((button) => button.addEventListener("click", () => {
     state.screen = button.dataset.screen;
     renderApp();
+    applyPendingServiceWorkerUpdate();
   }));
   app.querySelectorAll('[data-action="logout"]').forEach((button) => button.addEventListener("click", signOut));
   const onlineToggle = app.querySelector('[data-action="online"]');
@@ -441,7 +511,7 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${state.profiles.filter((profile) => profile.role === "motorizado" && profile.approved && !profile.suspended).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${statusBadge(order.status)}</div>
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br><strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}</p>
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br><strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}</p>
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
@@ -497,6 +567,8 @@ function renderStaffOrders() {
 function renderCreateOrder() {
   return `<article class="card form-card"><form id="create-order" class="form-grid">
     <label>Aliado comercial<select name="allyId" required><option value="">Selecciona un aliado</option>${state.allies.map((ally) => `<option value="${ally.id}">${escapeHtml(ally.name)}</option>`).join("")}</select></label>
+    <label class="inline-checkbox"><input type="checkbox" id="assign-courier-toggle">Asignar repartidor ahora</label>
+    <label class="wide hidden" id="assigned-courier-field">Motorizado activo<select name="courierId" id="assigned-courier"><option value="">Selecciona un motorizado activo</option>${activeCouriers().map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)} (@${escapeHtml(profile.username)})</option>`).join("")}</select><span class="muted">Solo aparecen motorizados activos ahora.</span></label>
     <label>Nombre del cliente<input name="clientName" required></label>
     <label>Teléfono del cliente<input name="clientPhone" type="tel" required></label>
     <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="any" inputmode="decimal" required></label>
@@ -526,7 +598,7 @@ function renderReports() {
 }
 
 function reportTable(orders) {
-  return `<table><thead><tr><th>Aliado</th><th>Cliente</th><th>Dirección</th><th>Motorizado</th><th>Hora comercio</th><th>Hora entrega</th><th>Fecha</th><th>Delivery</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escapeHtml(order.allies?.name)}</td><td>${escapeHtml(order.client_name)}</td><td>${escapeHtml(order.address)}</td><td>${escapeHtml(order.courier?.full_name || order.courier_name || "")}</td><td>${dateTime(order.at_store_at)}</td><td>${dateTime(order.delivered_at)}</td><td>${new Date(order.delivered_at).toLocaleDateString("es-CO")}</td><td>${formatMoney(order.delivery_fee)}</td></tr>`).join("") : `<tr><td colspan="8">Sin pedidos para el periodo seleccionado.</td></tr>`}</tbody></table>`;
+  return `<table><thead><tr><th>Aliado</th><th>Cliente</th><th>Dirección</th><th>Motorizado</th><th>Creado por</th><th>Hora comercio</th><th>Hora entrega</th><th>Fecha</th><th>Delivery</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escapeHtml(order.allies?.name)}</td><td>${escapeHtml(order.client_name)}</td><td>${escapeHtml(order.address)}</td><td>${escapeHtml(order.courier?.full_name || order.courier_name || "")}</td><td>${escapeHtml(order.creator?.full_name || order.creator_name || "—")}</td><td>${dateTime(order.at_store_at)}</td><td>${dateTime(order.delivered_at)}</td><td>${new Date(order.delivered_at).toLocaleDateString("es-CO")}</td><td>${formatMoney(order.delivery_fee)}</td></tr>`).join("") : `<tr><td colspan="9">Sin pedidos para el periodo seleccionado.</td></tr>`}</tbody></table>`;
 }
 
 function reportOrders() {
@@ -538,6 +610,14 @@ function reportOrders() {
 function bindScreenActions() {
   const createForm = document.querySelector("#create-order");
   if (createForm) createForm.addEventListener("submit", createOrder);
+  const assignCourierToggle = document.querySelector("#assign-courier-toggle");
+  if (assignCourierToggle) assignCourierToggle.addEventListener("change", () => {
+    const courierField = document.querySelector("#assigned-courier-field");
+    const courierSelect = document.querySelector("#assigned-courier");
+    courierField.classList.toggle("hidden", !assignCourierToggle.checked);
+    courierSelect.required = assignCourierToggle.checked;
+    if (!assignCourierToggle.checked) courierSelect.value = "";
+  });
   const allyForm = document.querySelector("#ally-form");
   if (allyForm) allyForm.addEventListener("submit", createAlly);
   const staffStatus = document.querySelector("#staff-status");
@@ -612,21 +692,24 @@ async function createOrder(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   const mapsUrl = String(data.get("mapsUrl")).trim();
+  const assignedCourier = document.querySelector("#assign-courier-toggle").checked;
   if (!/^https?:\/\/\S+$/i.test(mapsUrl)) return showToast("La ubicación debe ser una URL http o https.", true);
-  const { error } = await supabase.from("orders").insert({
-    ally_id: data.get("allyId"),
-    client_name: String(data.get("clientName")).trim(),
-    client_phone: String(data.get("clientPhone")).trim(),
-    address: String(data.get("address")).trim(),
-    maps_url: mapsUrl,
-    delivery_fee: Number(data.get("deliveryFee")),
-    created_by: state.profile.id
+  const { data: orderId, error } = await supabase.rpc("create_order", {
+    p_ally_id: data.get("allyId"),
+    p_client_name: String(data.get("clientName")).trim(),
+    p_client_phone: String(data.get("clientPhone")).trim(),
+    p_address: String(data.get("address")).trim(),
+    p_maps_url: mapsUrl,
+    p_delivery_fee: Number(data.get("deliveryFee")),
+    p_courier_id: assignedCourier ? data.get("courierId") : null
   });
   if (error) return reportError(error);
-  showToast("Pedido creado y disponible para los motorizados.");
+  showToast(assignedCourier ? "Pedido creado y asignado al motorizado." : "Pedido creado y disponible para los motorizados.");
   state.screen = "pedidos";
   await refreshData(false);
   renderApp();
+  applyPendingServiceWorkerUpdate();
+  return orderId;
 }
 
 async function createAlly(event) {
@@ -680,6 +763,7 @@ function exportReport() {
     ["Cliente", (order) => order.client_name],
     ["Direccion", (order) => order.address],
     ["Motorizado", (order) => order.courier?.full_name || ""],
+    ["Creado por", (order) => order.creator?.full_name || order.creator_name || ""],
     ["Hora llegada comercio", (order) => order.at_store_at ? new Date(order.at_store_at).toLocaleTimeString("es-CO") : ""],
     ["Hora entrega", (order) => order.delivered_at ? new Date(order.delivered_at).toLocaleTimeString("es-CO") : ""],
     ["Fecha", (order) => order.delivered_at ? new Date(order.delivered_at).toLocaleDateString("es-CO") : ""],

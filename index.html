@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111014">
+    <meta name="description" content="A un paso delivery: gestión de pedidos y entregas.">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./images (1).png">
+    <link rel="stylesheet" href="./styles.css">
+    <title>A un paso delivery</title>
+  </head>
+  <body>
+    <main id="app" aria-live="polite">
+      <section class="auth-shell">
+        <div class="auth-card">
+          <img class="brand-logo" src="./images (1).png" alt="A un paso delivery">
+          <p class="eyebrow">GESTIÓN DE ENTREGAS</p>
+          <h1 id="auth-title">Bienvenido</h1>
+          <p class="muted" id="auth-description">Ingresa a tu cuenta para continuar.</p>
+          <form id="auth-form" class="stack">
+            <div id="register-fields" class="stack hidden">
+              <label>Nombre<input name="firstName" autocomplete="given-name" required></label>
+              <label>Apellido<input name="lastName" autocomplete="family-name" required></label>
+              <label>Teléfono<input name="phone" type="tel" autocomplete="tel" required></label>
+            </div>
+            <label>Usuario<input name="username" autocomplete="username" required minlength="3"></label>
+            <label>Contraseña<input name="password" type="password" autocomplete="current-password" required minlength="6"></label>
+            <p id="auth-error" class="error hidden" role="alert"></p>
+            <button class="button primary full" id="auth-submit" type="submit">Iniciar sesión</button>
+          </form>
+          <button class="text-button" id="auth-toggle" type="button">¿No tienes cuenta? Crear cuenta</button>
+          <p class="fine-print">El acceso a cuentas nuevas requiere aprobación de administración.</p>
+        </div>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

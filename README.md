@@ -30,8 +30,13 @@ Para probar localmente, sirve esta carpeta con un servidor HTTP local; abrir `in
 - Registro sin correo, inicio de sesión por usuario, aprobación y roles.
 - Pedidos, asignaciones atómicas y estados con hora de llegada al comercio, salida y entrega.
 - Disponibilidad de motorizados con heartbeat y conteo de actividad reciente.
+- Alertas para motorizados con sonido sintetizado, vibración y notificaciones del sistema (si el dispositivo y navegador las permiten).
 - Gestión de usuarios, suspensión/eliminación de acceso, aliados, métricas e historial.
 - Exportación del reporte de entregas en formato Excel XML `.xls`.
 - Diseño adaptable, manifest y service worker instalable.
 
 Los cambios de pedidos y disponibilidad se reflejan mediante Supabase Realtime, con actualización periódica de respaldo mientras la sesión está abierta.
+
+La PWA no bloquea las herramientas de desarrollo del navegador: eso no protege el código ni los datos, que deben protegerse en Supabase con Auth, RLS y validación de permisos. Las actualizaciones en segundo plano no reemplazan el formulario de creación mientras está abierto, para evitar perder lo que se está escribiendo.
+
+Los motorizados deben pulsar **Activar alertas** desde la PWA para habilitar el sonido y, si lo desean, conceder permiso para notificaciones del sistema. La vibración depende de que el navegador/dispositivo soporte la API y de los ajustes del teléfono. Estas alertas llegan cuando la PWA está abierta y conectada; para avisos push fiables con la app cerrada se requiere configurar Web Push (VAPID y un servicio backend/Edge Function), que no está incluido en este despliegue estático.

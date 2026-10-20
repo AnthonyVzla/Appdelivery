@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, realtime: null };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, realtime: null, alertsEnabled: false, audioContext: null, notifiedOrders: new Set() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -70,6 +70,8 @@ async function loadProfile() {
     return;
   }
   state.profile = data;
+  state.notifiedOrders.clear();
+  state.alertsEnabled = localStorage.getItem(`aunpaso-alerts-${data.id}`) === "true";
   if (!data.approved || !data.role || data.suspended) {
     renderPending();
     return;
@@ -88,24 +90,36 @@ async function loadProfile() {
       if (heartbeatError) console.error("No se pudo actualizar la actividad del motorizado:", heartbeatError);
     }
     await refreshData(true);
+    renderIfSafe();
   }, 18000);
+}
+
+function renderIfSafe() {
+  if (state.screen === "crear") return;
+  if (app.querySelector("input:focus, textarea:focus, select:focus")) return;
+  const hasUnsavedFormData = [...app.querySelectorAll("form input, form textarea, form select")]
+    .some((field) => field.value.trim() !== "");
+  if (!hasUnsavedFormData) renderApp();
 }
 
 function startRealtime() {
   if (state.realtime) supabase.removeChannel(state.realtime);
   const channel = supabase.channel(`updates-${state.profile.id}`);
   if (state.profile.role === "motorizado") {
-    channel.on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders", filter: `courier_id=eq.${state.profile.id}` }, async () => {
+    channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "orders" }, async () => {
       await refreshData(true);
-      renderApp();
+      renderIfSafe();
+    }).on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders", filter: `courier_id=eq.${state.profile.id}` }, async () => {
+      await refreshData(true);
+      renderIfSafe();
     });
   } else {
     channel.on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async () => {
       await refreshData(true);
-      renderApp();
+      renderIfSafe();
     }).on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, async () => {
       await refreshData(true);
-      renderApp();
+      renderIfSafe();
     });
   }
   state.realtime = channel.subscribe((status) => {
@@ -201,11 +215,17 @@ async function refreshData(quiet) {
     if (!quiet) reportError(orderError);
     return;
   }
-  const previousCouriers = new Map(state.orders.map((order) => [order.id, order.courier_id]));
+  const previousOrders = new Map(state.orders.map((order) => [order.id, order]));
   state.orders = orders || [];
   if (quiet && state.profile.role === "motorizado") {
-    const newAssignments = state.orders.filter((order) => order.courier_id === state.profile.id && order.status !== "delivered" && previousCouriers.get(order.id) !== state.profile.id);
-    if (newAssignments.length) showToast(newAssignments.length === 1 ? "Tienes un pedido asignado." : `Tienes ${newAssignments.length} pedidos asignados.`);
+    for (const order of state.orders) {
+      const previous = previousOrders.get(order.id);
+      if (order.courier_id === state.profile.id && order.status !== "delivered" && previous?.courier_id !== state.profile.id) {
+        emitCourierNotification("assigned", order);
+      } else if (!previous && order.status === "pending" && state.profile.online) {
+        emitCourierNotification("incoming", order);
+      }
+    }
   }
   if (["administracion", "soporte"].includes(state.profile.role)) {
     const [allyResult, profileResult] = await Promise.all([
@@ -219,7 +239,6 @@ async function refreshData(quiet) {
     state.allies = allyResult.data || [];
     state.profiles = profileResult.data || [];
   }
-  if (quiet) renderApp();
 }
 
 const navItems = {
@@ -241,7 +260,7 @@ function renderApp() {
     </aside>
     <main class="main">
       <header class="topbar"><div><div class="mobile-brand"><img src="./images (1).png" alt=""><strong>A un paso delivery</strong></div><h1>${escapeHtml(titleFor(state.screen))}</h1><p>${new Intl.DateTimeFormat("es-CO", { dateStyle: "full" }).format(new Date())}</p></div>
-        ${state.profile.role === "motorizado" ? `<label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label>` : `<span class="badge green">${countOnline()} motorizados activos</span>`}
+        ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label></div>` : `<span class="badge green">${countOnline()} motorizados activos</span>`}
       </header>
       <section id="screen-content">${renderScreen()}</section>
     </main>
@@ -254,7 +273,106 @@ function renderApp() {
   app.querySelectorAll('[data-action="logout"]').forEach((button) => button.addEventListener("click", signOut));
   const onlineToggle = app.querySelector('[data-action="online"]');
   if (onlineToggle) onlineToggle.addEventListener("change", toggleOnline);
+  const alertsButton = app.querySelector('[data-action="alerts"]');
+  if (alertsButton) alertsButton.addEventListener("click", toggleCourierAlerts);
   bindScreenActions();
+}
+
+async function toggleCourierAlerts() {
+  if (state.alertsEnabled) {
+    state.alertsEnabled = false;
+    localStorage.setItem(`aunpaso-alerts-${state.profile.id}`, "false");
+    showToast("Alertas de sonido y vibración desactivadas.");
+    renderApp();
+    return;
+  }
+
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      state.audioContext ||= new AudioContextClass();
+      if (state.audioContext.state === "suspended") await state.audioContext.resume();
+    }
+    if ("Notification" in window && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+    state.alertsEnabled = true;
+    localStorage.setItem(`aunpaso-alerts-${state.profile.id}`, "true");
+    playCourierAlert("incoming");
+    showToast("Alertas activadas. El teléfono sonará y vibrará con pedidos nuevos.");
+    renderApp();
+  } catch (error) {
+    reportError(new Error(`No se pudieron activar las alertas: ${error.message}`));
+  }
+}
+
+function playCourierAlert(kind) {
+  if (!state.alertsEnabled) return;
+  const audio = state.audioContext;
+  if (audio?.state === "running") {
+    const notes = kind === "assigned" ? [740, 988, 740, 988] : [587, 784, 988];
+    const startAt = audio.currentTime;
+    notes.forEach((frequency, index) => {
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      const noteStart = startAt + index * 0.16;
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, noteStart);
+      gain.gain.exponentialRampToValueAtTime(0.14, noteStart + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
+      oscillator.connect(gain);
+      gain.connect(audio.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteStart + 0.14);
+    });
+  }
+  if (typeof navigator.vibrate === "function") {
+    navigator.vibrate(kind === "assigned" ? [350, 120, 350, 120, 500] : [180, 90, 180]);
+  }
+}
+
+async function notifyCourier(kind, order) {
+  const allyName = order.allies?.name || "Aliado";
+  const message = kind === "assigned"
+    ? `Tienes un pedido asignado de ${allyName}.`
+    : `Nuevo pedido disponible de ${allyName}.`;
+  showToast(message);
+  if (!state.alertsEnabled) return;
+  playCourierAlert(kind);
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const registration = await navigator.serviceWorker?.ready;
+    if (registration) {
+      await registration.showNotification(kind === "assigned" ? "Pedido asignado" : "Nuevo pedido disponible", {
+        body: `${allyName} · ${order.client_name}`,
+        icon: "./images (1).png",
+        tag: `order-${order.id}-${kind}`,
+        renotify: true,
+        vibrate: kind === "assigned" ? [350, 120, 350, 120, 500] : [180, 90, 180],
+        data: { url: "./" }
+      });
+    } else {
+      new Notification(kind === "assigned" ? "Pedido asignado" : "Nuevo pedido disponible", {
+        body: `${allyName} · ${order.client_name}`,
+        icon: "./images (1).png",
+        tag: `order-${order.id}-${kind}`
+      });
+    }
+
+  } catch (error) {
+    console.error("No se pudo mostrar la notificación del pedido:", error);
+  }
+}
+
+function emitCourierNotification(kind, order) {
+  const key = `${order.id}:${kind}`;
+  if (state.notifiedOrders.has(key)) return;
+  state.notifiedOrders.add(key);
+  if (state.notifiedOrders.size > 500) {
+    state.notifiedOrders.delete(state.notifiedOrders.values().next().value);
+  }
+  void notifyCourier(kind, order);
 }
 
 function titleFor(screen) {
@@ -381,7 +499,7 @@ function renderCreateOrder() {
     <label>Aliado comercial<select name="allyId" required><option value="">Selecciona un aliado</option>${state.allies.map((ally) => `<option value="${ally.id}">${escapeHtml(ally.name)}</option>`).join("")}</select></label>
     <label>Nombre del cliente<input name="clientName" required></label>
     <label>Teléfono del cliente<input name="clientPhone" type="tel" required></label>
-    <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="100" required></label>
+    <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="any" inputmode="decimal" required></label>
     <label class="wide">Dirección escrita<textarea name="address" required></textarea></label>
     <label class="wide">Ubicación de Google Maps (URL)<input name="mapsUrl" type="url" placeholder="https://maps.google.com/..." required></label>
     <div class="wide"><button class="button primary" type="submit">Crear pedido</button></div>
@@ -487,6 +605,7 @@ async function toggleOnline(event) {
   state.profile.online = online;
   showToast(online ? "Estás activo y puedes recibir pedidos." : "Quedaste desconectado.");
   await refreshData(true);
+  renderApp();
 }
 
 async function createOrder(event) {
@@ -544,6 +663,7 @@ async function updateOrder(id, action, args = {}) {
   if (error) return reportError(error);
   showToast(action === "claim_order" ? "Pedido asignado a tu cuenta." : action === "assign_order" ? "Pedido asignado al motorizado." : "Estado del pedido actualizado.");
   await refreshData(true);
+  renderApp();
 }
 
 async function updateProfile(id, changes) {

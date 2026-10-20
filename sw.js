@@ -20,3 +20,12 @@ self.addEventListener("fetch", (event) => {
     return response;
   }).catch(() => caches.match(request).then((cached) => cached || caches.match("./index.html"))));
 });
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+    const appClient = clients.find((client) => new URL(client.url).origin === self.location.origin);
+    if (appClient) return appClient.focus();
+    return self.clients.openWindow(event.notification.data?.url || "./");
+  }));
+});

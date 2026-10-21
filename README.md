@@ -1,10 +1,10 @@
 # A un paso delivery
 
-PWA de gestión de pedidos para motorizados, soporte y administración. La aplicación es estática y se publica en GitHub Pages; Supabase proporciona autenticación, base de datos, RLS y actualizaciones en tiempo real.
+PWA de gestión de pedidos para motorizados, aliados, soporte y administración. La aplicación es estática y se publica en GitHub Pages; Supabase proporciona autenticación, base de datos, RLS y actualizaciones en tiempo real.
 
 ## Configuración de Supabase
 
-1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`. Al desplegar una versión nueva del esquema, puedes volver a ejecutar el archivo: agrega de forma idempotente la función de creación con asignación opcional y el nombre histórico del creador.
+1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`. Vuelve a ejecutarlo para aplicar el rol aliado, la cola privada de pedidos, alarmas/tiempos y la ubicación de comercios; las ampliaciones están preparadas para ejecutarse de nuevo.
 2. En **Authentication → Providers → Email**, desactiva **Confirm email** antes de registrar usuarios. La interfaz pide usuario y contraseña, no correo: internamente utiliza un alias técnico `usuario@users.aunpaso.local` para el proveedor de contraseña de Supabase.
 3. Registra la cuenta que será la primera administradora. En SQL Editor, asígnale el rol:
 
@@ -14,7 +14,7 @@ PWA de gestión de pedidos para motorizados, soporte y administración. La aplic
    where username = 'tu_usuario';
    ```
 
-4. Inicia sesión como administración. Aprueba las demás cuentas asignándoles el rol correspondiente. Las cuentas nuevas empiezan sin rol y sin acceso. Crea los aliados comerciales en **Aliados**.
+4. Inicia sesión como administración. Crea los aliados comerciales y su URL GPS en **Aliados**. En **Usuarios**, selecciona el rol y, para cuentas **Aliado**, el comercio asociado; pulsa **Guardar** para aplicar juntos el rol, la aprobación y el comercio. Las cuentas nuevas empiezan sin rol y sin acceso.
 5. Revisa **Authentication → URL Configuration** y agrega la URL publicada en GitHub Pages a las URLs permitidas.
 
 La URL del proyecto y la clave `anon`/publishable son públicas por diseño y están en `app.js`. La seguridad de los datos está en las políticas RLS y las funciones SQL. **No añadas nunca la `service_role` key al frontend ni al repositorio.**
@@ -35,7 +35,7 @@ Para probar localmente, sirve esta carpeta con un servidor HTTP local; abrir `in
 - Exportación del reporte de entregas en formato Excel XML `.xls`.
 - Diseño adaptable, manifest y service worker instalable.
 
-Los cambios de pedidos y disponibilidad se reflejan mediante Supabase Realtime, con actualización periódica de respaldo mientras la sesión está abierta. Al crear un pedido, soporte puede asignar opcionalmente un motorizado que esté activo; la base de datos valida su disponibilidad y asigna el pedido de forma privada. El creador del pedido queda guardado como una copia histórica y aparece en comandas e informes.
+Los cambios de pedidos y disponibilidad se reflejan mediante Supabase Realtime, con actualización periódica de respaldo mientras la sesión está abierta. Un aliado solo ve sus pedidos; se crean en una cola privada hasta que soporte los libera o asigna. Soporte puede liberar el pedido para motorizados activos o asignarlo a uno directamente. Los pedidos tienen un aviso de retraso a los 10 minutos; soporte/administración debe habilitar el botón **Activar alarma** en cada dispositivo para oír el sonido. El motorizado ve el 70% de ganancia, puede copiar el teléfono, contactar por WhatsApp y abrir el GPS del comercio. El creador queda guardado como dato histórico en las comandas e informes.
 
 ## Actualizaciones automáticas instaladas
 

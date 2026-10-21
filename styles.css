@@ -81,6 +81,12 @@ textarea { min-height: 82px; resize: vertical; }
 .toolbar label { min-width: 155px; }
 .list { display: grid; gap: 12px; }
 .order-card { padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.order-card.late { border-color: #bd3d4e; background: linear-gradient(145deg, #381a22, #21171c); }
+.deadline { display: inline-flex; margin-top: 12px; padding: 6px 9px; border-radius: 8px; color: #ffd18c; background: #df9b351e; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.deadline.overdue { color: #fff; background: #c62e42; animation: overdue-pulse 1.2s ease-in-out infinite alternate; }
+.courier-earnings { align-self: center; font-size: 12px; }
+.mobile-logout { display: none; }
+@keyframes overdue-pulse { to { box-shadow: 0 0 16px #ff405966; } }
 .order-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .order-top h3 { font-size: 16px; margin-bottom: 5px; }
 .order-top p, .order-detail { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0; overflow-wrap: anywhere; }
@@ -124,6 +130,7 @@ tr:last-child td { border-bottom: 0; }
   .topbar { align-items: center; margin-bottom: 24px; }
   .topbar .button { padding: 9px 11px; }
   .header-actions { gap: 9px; }
+  .mobile-logout { display: inline-flex; }
   .mobile-nav { display: flex; gap: 4px; position: fixed; z-index: 5; left: 0; right: 0; bottom: 0; padding: 8px 5px max(8px, env(safe-area-inset-bottom)); overflow-x: auto; border-top: 1px solid var(--line); background: #151319f5; backdrop-filter: blur(12px); }
   .mobile-nav .nav-button { flex: 1 0 74px; padding: 10px 6px; text-align: center; font-size: 10px; }
 }

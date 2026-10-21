@@ -5,9 +5,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
-const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración" };
+const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, audioContext: null, notifiedOrders: new Set() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, audioContext: null, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -127,6 +127,10 @@ async function loadProfile() {
   renderApp();
   startRealtime();
   clearInterval(state.refreshTimer);
+  clearInterval(state.overdueTimer);
+  if (["soporte", "administracion"].includes(state.profile.role)) {
+    state.overdueTimer = setInterval(updateOverdueClocks, 1000);
+  }
   state.refreshTimer = setInterval(async () => {
     if (state.profile.role === "motorizado" && state.profile.online) {
       const { error: heartbeatError } = await supabase.rpc("heartbeat_courier");
@@ -147,7 +151,7 @@ function startRealtime() {
   if (state.realtime) supabase.removeChannel(state.realtime);
   const channel = supabase.channel(`updates-${state.profile.id}`);
   if (state.profile.role === "motorizado") {
-    channel.on("postgres_changes", { event: "INSERT", schema: "public", table: "orders" }, async () => {
+    channel.on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async () => {
       await refreshData(true);
       renderIfSafe();
     }).on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders", filter: `courier_id=eq.${state.profile.id}` }, async () => {
@@ -250,7 +254,7 @@ function renderPending() {
 async function refreshData(quiet) {
   if (!state.profile || !state.session) return;
   const { data: orders, error: orderError } = await supabase.from("orders")
-    .select("*, allies(name), courier:profiles!orders_courier_id_fkey(full_name, username, phone), creator:profiles!orders_created_by_fkey(full_name)")
+    .select("*, allies(name, location_url), courier:profiles!orders_courier_id_fkey(full_name, username, phone), creator:profiles!orders_created_by_fkey(full_name)")
     .order("created_at", { ascending: false }).limit(500);
   if (orderError) {
     if (!quiet) reportError(orderError);
@@ -263,15 +267,15 @@ async function refreshData(quiet) {
       const previous = previousOrders.get(order.id);
       if (order.courier_id === state.profile.id && order.status !== "delivered" && previous?.courier_id !== state.profile.id) {
         emitCourierNotification("assigned", order);
-      } else if (!previous && order.status === "pending" && state.profile.online) {
+      } else if (!previous && order.status === "pending" && order.released && state.profile.online) {
         emitCourierNotification("incoming", order);
       }
     }
   }
-  if (["administracion", "soporte"].includes(state.profile.role)) {
+  if (["administracion", "soporte", "aliado"].includes(state.profile.role)) {
     const [allyResult, profileResult] = await Promise.all([
       supabase.from("allies").select("*").order("name"),
-      supabase.from("profiles").select("id, username, full_name, phone, role, approved, suspended, online, last_seen_at, updated_at").order("full_name")
+      supabase.from("profiles").select("id, username, full_name, phone, role, ally_id, approved, suspended, online, last_seen_at, updated_at").order("full_name")
     ]);
     if (allyResult.error || profileResult.error) {
       if (!quiet) reportError(allyResult.error || profileResult.error);
@@ -312,14 +316,15 @@ function refreshActiveCourierOptions() {
 
 const navItems = {
   motorizado: [["inicio", "Resumen"], ["activos", "Pedidos activos"], ["curso", "Pedido en curso"], ["entregados", "Entregados"]],
-  soporte: [["inicio", "Resumen"], ["crear", "Crear pedido"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["aliados", "Aliados"]],
-  administracion: [["inicio", "Resumen"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]]
+  soporte: [["inicio", "Resumen"], ["crear", "Crear pedido"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["aliados", "Aliados"]],
+  administracion: [["inicio", "Resumen"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]],
+  aliado: [["crear", "Crear pedido"], ["mis_pedidos", "Pedidos en curso"], ["historial", "Historial"]]
 };
 
 function renderApp() {
   if (!state.profile?.role) return renderPending();
   const items = navItems[state.profile.role] || [];
-  if (!items.some(([key]) => key === state.screen)) state.screen = "inicio";
+  if (!items.some(([key]) => key === state.screen)) state.screen = items[0]?.[0] || "inicio";
   const nav = items.map(([key, label]) => `<button class="nav-button ${state.screen === key ? "active" : ""}" data-screen="${key}">${label}</button>`).join("");
   app.innerHTML = `<div class="layout">
     <aside class="sidebar">
@@ -329,7 +334,7 @@ function renderApp() {
     </aside>
     <main class="main">
       <header class="topbar"><div><div class="mobile-brand"><img src="./images (1).png" alt=""><strong>A un paso delivery</strong></div><h1>${escapeHtml(titleFor(state.screen))}</h1><p>${new Intl.DateTimeFormat("es-CO", { dateStyle: "full" }).format(new Date())}</p></div>
-        ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label></div>` : `<span class="badge green">${countOnline()} motorizados activos</span>`}
+        ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label><button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button></div>` : `<div class="header-actions">${["soporte", "administracion"].includes(state.profile.role) ? `<button class="button subtle small" data-action="overdue-sound" aria-pressed="${state.overdueSoundsEnabled}">${state.overdueSoundsEnabled ? "Alarma activada" : "Activar alarma"}</button><span class="badge green">${countOnline()} motorizados activos</span>` : ""}${["soporte", "administracion", "aliado"].includes(state.profile.role) ? `<button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button>` : ""}</div>`}
       </header>
       <section id="screen-content">${renderScreen()}</section>
     </main>
@@ -345,6 +350,8 @@ function renderApp() {
   if (onlineToggle) onlineToggle.addEventListener("change", toggleOnline);
   const alertsButton = app.querySelector('[data-action="alerts"]');
   if (alertsButton) alertsButton.addEventListener("click", toggleCourierAlerts);
+  const overdueSoundButton = app.querySelector('[data-action="overdue-sound"]');
+  if (overdueSoundButton) overdueSoundButton.addEventListener("click", enableOverdueSounds);
   bindScreenActions();
 }
 
@@ -446,7 +453,7 @@ function emitCourierNotification(kind, order) {
 }
 
 function titleFor(screen) {
-  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas" })[screen] || "A un paso delivery";
+  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", pendientes: "Pedidos pendientes", mis_pedidos: "Pedidos en curso", historial: "Historial", motorizados: "Motorizados activos", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas" })[screen] || "A un paso delivery";
 }
 
 function countOnline() {
@@ -462,10 +469,17 @@ function dayStart(date = new Date()) {
 
 function renderScreen() {
   const role = state.profile.role;
+  if (role === "aliado") {
+    if (state.screen === "crear") return renderCreateOrder();
+    if (state.screen === "mis_pedidos") return renderAllyOrders(false);
+    if (state.screen === "historial") return renderAllyOrders(true);
+  }
   if (state.screen === "inicio") return renderDashboard();
-  if (state.screen === "crear" && role === "soporte") return renderCreateOrder();
+  if (state.screen === "crear" && ["soporte", "administracion"].includes(role)) return renderCreateOrder();
+  if (state.screen === "pendientes" && ["soporte", "administracion"].includes(role)) return renderPendingOrders();
   if (state.screen === "activos" && role === "motorizado") return renderCourierAvailable();
   if (state.screen === "curso" && role === "motorizado") return renderCourierCurrent();
+  if (state.screen === "motorizados" && ["soporte", "administracion"].includes(role)) return renderActiveCouriers();
   if (state.screen === "pedidos" && role !== "motorizado") return renderStaffOrders();
   if (state.screen === "entregados") return role === "motorizado" ? renderCourierDelivered() : renderCompletedOrders();
   if (state.screen === "aliados" && role !== "motorizado") return renderAllies();
@@ -474,16 +488,32 @@ function renderScreen() {
   return `<div class="empty">Selecciona una sección.</div>`;
 }
 
+function renderPendingOrders() {
+  const orders = state.orders.filter((order) => order.status === "pending" && !order.courier_id);
+  return `<p class="muted">Pedidos creados por aliados y pedidos aún sin motorizado. Asígnalos o libéralos para que los motorizados activos puedan tomarlos.</p><div class="list">${renderOrderCards(orders, "pending")}</div>`;
+}
+
+function renderAllyOrders(history) {
+  const orders = state.orders.filter((order) => history ? order.status === "delivered" : order.status !== "delivered");
+  return `<p class="muted">${history ? "Pedidos entregados de tu aliado." : "Pedidos en espera de soporte, asignados o en curso."}</p><div class="list">${renderOrderCards(orders, history ? "completed" : "ally")}</div>`;
+}
+
+function renderActiveCouriers() {
+  const couriers = activeCouriers();
+  if (!couriers.length) return `<div class="empty">No hay motorizados activos en este momento.</div>`;
+  return `<div class="list">${couriers.map((profile) => `<article class="card order-top"><div><h3>${escapeHtml(profile.full_name)}</h3><p>@${escapeHtml(profile.username)} · ${escapeHtml(profile.phone || "Sin teléfono")}</p><p class="muted">Última conexión: ${dateTime(profile.last_seen_at)}</p></div><span class="badge green">Activo</span></article>`).join("")}</div>`;
+}
+
 function renderDashboard() {
   const role = state.profile.role;
   const today = dayStart();
   const createdToday = state.orders.filter((order) => new Date(order.created_at) >= today && (role !== "motorizado" || order.courier_id === state.profile.id));
   const completed = state.orders.filter((order) => order.status === "delivered" && new Date(order.delivered_at) >= today);
-  const revenue = completed.reduce((sum, order) => sum + Number(order.delivery_fee), 0);
+  const revenue = completed.reduce((sum, order) => sum + (role === "motorizado" ? courierEarnings(order) : Number(order.delivery_fee)), 0);
   const activeOrders = state.orders.filter((order) => order.status !== "delivered");
   return `<div class="grid metrics">
     <article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${completed.length} entregas finalizadas</span></article>
-    <article class="card"><span class="metric-label">Delivery generado hoy</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">Suma de costos de delivery</span></article>
+    <article class="card"><span class="metric-label">${role === "motorizado" ? "Tu ganancia hoy (70%)" : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
     <article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${role === "motorizado" ? (state.profile.online ? "1" : "0") : countOnline()}</div><span class="metric-foot">Disponibles en este momento</span></article>
   </div>
   <div class="section-head"><h2>${role === "motorizado" ? "Tus entregas activas" : "Pedidos en curso"}</h2></div>
@@ -492,26 +522,141 @@ function renderDashboard() {
 
 function statusBadge(status) {
   const color = status === "delivered" ? "green" : status === "pending" ? "gray" : status === "in_transit" ? "orange" : "";
-  return `<span class="badge ${color}">${statusNames[status] || status}</span>`;
+  const label = status === "pending" && state.profile.role !== "motorizado" ? "Pendiente de asignación" : statusNames[status] || status;
+  return `<span class="badge ${color}">${label}</span>`;
+}
+
+function whatsappUrl(phone, allyName) {
+  let digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length === 10) digits = `57${digits}`;
+  const message = `Buenas, soy el delivery de ${allyName}, ya estoy recogiendo su pedido, me confirma su ubicación por favor.`;
+  return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
+}
+
+function courierEarnings(order) {
+  return Number(order.delivery_fee || 0) * 0.7;
+}
+
+function orderDeadline(order) {
+  if (order.status === "pending") return new Date(order.created_at).getTime() + 10 * 60 * 1000;
+  if (order.status === "assigned" && !order.at_store_at) return new Date(order.assigned_at || order.created_at).getTime() + 10 * 60 * 1000;
+  return null;
+}
+
+function renderDeadline(order) {
+  if (!["soporte", "administracion"].includes(state.profile.role)) return "";
+  const deadline = orderDeadline(order);
+  if (!deadline) return "";
+  const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+  const overdue = seconds === 0;
+  const display = overdue ? `RETRASADO +${formatElapsed(-seconds)}` : `Llegada al comercio en ${formatElapsed(seconds)}`;
+  return `<div class="deadline ${overdue ? "overdue" : ""}" data-deadline="${deadline}" data-order-id="${order.id}">${display}</div>`;
+}
+
+function formatElapsed(seconds) {
+  const safeSeconds = Math.abs(seconds);
+  const minutes = String(Math.floor(safeSeconds / 60)).padStart(2, "0");
+  const remainingSeconds = String(safeSeconds % 60).padStart(2, "0");
+  return `${minutes}:${remainingSeconds}`;
+}
+
+function updateOverdueClocks() {
+  const now = Date.now();
+  document.querySelectorAll(".deadline[data-deadline]").forEach((node) => {
+    const deadline = Number(node.dataset.deadline);
+    const seconds = Math.ceil((deadline - now) / 1000);
+    const overdue = seconds <= 0;
+    node.classList.toggle("overdue", overdue);
+    node.closest(".order-card")?.classList.toggle("late", overdue);
+    node.textContent = overdue
+      ? `RETRASADO +${formatElapsed(-seconds)}`
+      : `Llegada al comercio en ${formatElapsed(seconds)}`;
+  });
+
+  if (!state.overdueSoundsEnabled || document.hidden) return;
+  let shouldAlarm = false;
+  for (const order of state.orders) {
+    const deadline = orderDeadline(order);
+    if (!deadline || now < deadline) continue;
+    const lastAlarm = state.overdueAlarmTimes.get(order.id) || 0;
+    if (now - lastAlarm < 2 * 60 * 1000) continue;
+    state.overdueAlarmTimes.set(order.id, now);
+    shouldAlarm = true;
+  }
+  if (shouldAlarm) playOverdueAlarm();
+}
+
+async function enableOverdueSounds() {
+  if (state.overdueSoundsEnabled) {
+    state.overdueSoundsEnabled = false;
+    showToast("Alarma de pedidos retrasados desactivada.");
+    renderApp();
+    return;
+  }
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error("Este navegador no permite reproducir la alarma.");
+    state.audioContext ||= new AudioContextClass();
+    if (state.audioContext.state === "suspended") await state.audioContext.resume();
+    state.overdueSoundsEnabled = true;
+    showToast("Alarma de pedidos retrasados activada en este dispositivo.");
+    renderApp();
+    playOverdueAlarm();
+  } catch (error) {
+    reportError(error);
+  }
+}
+
+function playOverdueAlarm() {
+  const audio = state.audioContext;
+  if (!state.overdueSoundsEnabled || audio?.state !== "running") return;
+  [880, 660, 880].forEach((frequency, index) => {
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const startAt = audio.currentTime + index * 0.24;
+    oscillator.type = "square";
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.12, startAt + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.18);
+    oscillator.connect(gain);
+    gain.connect(audio.destination);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + 0.2);
+  });
 }
 
 function renderOrderCards(orders, context = "") {
   if (!orders.length) return `<div class="empty">No hay pedidos para mostrar.</div>`;
   return orders.map((order) => {
-    const ally = escapeHtml(order.allies?.name || "Aliado");
+    const allyName = order.allies?.name || "Aliado";
+    const ally = escapeHtml(allyName);
     const courier = escapeHtml(order.courier?.full_name || "Sin asignar");
     const buttons = [];
-    if (context === "available") buttons.push(`<button class="button primary small" data-action="claim" data-id="${order.id}">Tomar pedido</button>`);
+    if (context === "available") {
+      buttons.push(`<span class="badge green courier-earnings">Tu ganancia: ${formatMoney(courierEarnings(order))}</span>`);
+      buttons.push(`<button class="button primary small" data-action="claim" data-id="${order.id}">Tomar pedido</button>`);
+    }
     if (context === "current") {
       const next = { assigned: ["at_store", "Llegada al comercio"], at_store: ["in_transit", "Pedido en camino"], in_transit: ["delivered", "Pedido entregado"] }[order.status];
       if (next) buttons.push(`<button class="button ${next[0] === "delivered" ? "success" : "primary"} small" data-action="advance" data-status="${next[0]}" data-id="${order.id}">${next[1]}</button>`);
       buttons.push(`<button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.maps_url || "")}">Abrir ubicación</button>`);
+      if (order.allies?.location_url) buttons.push(`<button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button>`);
+      buttons.push(`<button class="button subtle small" data-action="copy-phone" data-phone="${escapeHtml(order.client_phone)}">Copiar teléfono</button>`);
+      buttons.push(`<a class="button success small" target="_blank" rel="noopener noreferrer" href="${whatsappUrl(order.client_phone, allyName)}">Contactar cliente</a>`);
     }
-    if (context === "staff" && ["administracion", "soporte"].includes(state.profile.role) && order.status !== "delivered") {
+    if (context === "pending" && !order.released) buttons.push(`<button class="button primary small" data-action="release" data-id="${order.id}">Liberar pedido</button>`);
+    if (["staff", "pending"].includes(context) && ["administracion", "soporte"].includes(state.profile.role) && order.status !== "delivered") {
       buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${state.profiles.filter((profile) => profile.role === "motorizado" && profile.approved && !profile.suspended).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
-    return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${statusBadge(order.status)}</div>
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br><strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}</p>
+    const isCourier = state.profile.role === "motorizado";
+    const priceLabel = isCourier ? `<strong>Tu ganancia (70%):</strong> ${formatMoney(courierEarnings(order))}` : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}`;
+    const orderStatus = order.status === "pending" && order.released === false && ["soporte", "administracion"].includes(state.profile.role)
+      ? `<span class="badge orange">Pendiente de soporte</span>`
+      : statusBadge(order.status);
+    return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
+      ${renderDeadline(order)}
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br>${priceLabel}</p>
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
@@ -547,8 +692,8 @@ function filteredDelivered() {
 
 function deliveredSummary() {
   const orders = filteredDelivered();
-  const amount = orders.reduce((sum, order) => sum + Number(order.delivery_fee), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Dinero generado</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Total de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + Number(order.delivery_fee), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (70%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function filteredToday() {
@@ -565,10 +710,14 @@ function renderStaffOrders() {
 }
 
 function renderCreateOrder() {
+  const isAlly = state.profile.role === "aliado";
+  const linkedAlly = state.allies.find((ally) => ally.id === state.profile.ally_id);
   return `<article class="card form-card"><form id="create-order" class="form-grid">
-    <label>Aliado comercial<select name="allyId" required><option value="">Selecciona un aliado</option>${state.allies.map((ally) => `<option value="${ally.id}">${escapeHtml(ally.name)}</option>`).join("")}</select></label>
-    <label class="inline-checkbox"><input type="checkbox" id="assign-courier-toggle">Asignar repartidor ahora</label>
-    <label class="wide hidden" id="assigned-courier-field">Motorizado activo<select name="courierId" id="assigned-courier"><option value="">Selecciona un motorizado activo</option>${activeCouriers().map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)} (@${escapeHtml(profile.username)})</option>`).join("")}</select><span class="muted">Solo aparecen motorizados activos ahora.</span></label>
+    ${isAlly
+      ? `<div class="card wide"><strong>Aliado:</strong> ${escapeHtml(linkedAlly?.name || "Sin aliado asignado")}${linkedAlly?.location_url ? ` · <a href="${escapeHtml(linkedAlly.location_url)}" target="_blank" rel="noopener noreferrer">Ver GPS del comercio</a>` : ""}</div>`
+      : `<label>Aliado comercial<select name="allyId" required><option value="">Selecciona un aliado</option>${state.allies.map((ally) => `<option value="${ally.id}">${escapeHtml(ally.name)}</option>`).join("")}</select></label>
+        <label class="inline-checkbox"><input type="checkbox" id="assign-courier-toggle">Asignar repartidor ahora</label>
+        <label class="wide hidden" id="assigned-courier-field">Motorizado activo<select name="courierId" id="assigned-courier"><option value="">Selecciona un motorizado activo</option>${activeCouriers().map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)} (@${escapeHtml(profile.username)})</option>`).join("")}</select><span class="muted">Solo aparecen motorizados activos ahora.</span></label>`}
     <label>Nombre del cliente<input name="clientName" required></label>
     <label>Teléfono del cliente<input name="clientPhone" type="tel" required></label>
     <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="any" inputmode="decimal" required></label>
@@ -580,12 +729,12 @@ function renderCreateOrder() {
 
 function renderAllies() {
   const isAdmin = state.profile.role === "administracion";
-  return `<div class="section-head"><h2>Aliados comerciales</h2></div>${isAdmin ? `<form id="ally-form" class="toolbar"><label>Nombre del aliado<input name="name" required></label><button class="button primary">Agregar aliado</button></form>` : ""}
-    <div class="list">${state.allies.length ? state.allies.map((ally) => `<article class="card order-top"><div><h3>${escapeHtml(ally.name)}</h3><p class="muted">Creado ${dateTime(ally.created_at)}</p></div>${isAdmin ? `<button class="button danger small" data-action="delete-ally" data-id="${ally.id}">Eliminar</button>` : ""}</article>`).join("") : `<div class="empty">Aún no hay aliados registrados.</div>`}</div>`;
+  return `<div class="section-head"><h2>Aliados comerciales</h2></div>${isAdmin ? `<form id="ally-form" class="form-grid card"><label>Nombre del aliado<input name="name" required></label><label>Ubicación GPS del comercio (URL)<input name="locationUrl" type="url" placeholder="https://maps.google.com/..."></label><div class="wide"><button class="button primary">Agregar aliado</button></div></form>` : ""}
+    <div class="list">${state.allies.length ? state.allies.map((ally) => `<article class="card order-top"><div><h3>${escapeHtml(ally.name)}</h3><p class="muted">Creado ${dateTime(ally.created_at)}</p>${ally.location_url ? `<a class="text-button" href="${escapeHtml(ally.location_url)}" target="_blank" rel="noopener noreferrer">Ver ubicación del comercio</a>` : ""}</div>${isAdmin ? `<button class="button danger small" data-action="delete-ally" data-id="${ally.id}">Eliminar</button>` : ""}</article>`).join("") : `<div class="empty">Aún no hay aliados registrados.</div>`}</div>`;
 }
 
 function renderUsers() {
-  return `<div class="section-head"><h2>Usuarios y permisos</h2></div><div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Nombre y teléfono</th><th>Rol</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.profiles.map((profile) => `<tr><td>@${escapeHtml(profile.username)}</td><td><input aria-label="Nombre completo" data-profile-name="${profile.id}" value="${escapeHtml(profile.full_name)}"><input aria-label="Teléfono" data-profile-phone="${profile.id}" value="${escapeHtml(profile.phone || "")}" style="margin-top:6px"></td><td><select data-action="role" data-id="${profile.id}"><option value="">Sin rol</option>${Object.entries(roleNames).map(([value, label]) => `<option value="${value}" ${profile.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></td><td>${profile.suspended ? `<span class="badge">Suspendido</span>` : profile.approved ? `<span class="badge green">${profile.online ? "Activo" : "Aprobado"}</span>` : `<span class="badge orange">Pendiente</span>`}</td><td class="user-actions"><button class="button subtle small" data-action="save-profile" data-id="${profile.id}">Guardar</button><button class="button ${profile.suspended ? "success" : "danger"} small" data-action="suspend" data-id="${profile.id}" data-suspended="${profile.suspended}">${profile.suspended ? "Reactivar" : "Suspender"}</button><button class="button danger small" data-action="delete-user" data-id="${profile.id}">Eliminar</button></td></tr>`).join("")}</tbody></table></div><p class="fine-print">Eliminar una cuenta borra su acceso de inicio de sesión. Los pedidos quedan en el historial con el nombre del motorizado.</p>`;
+  return `<div class="section-head"><h2>Usuarios y permisos</h2></div><div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Nombre y teléfono</th><th>Rol</th><th>Aliado asignado</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.profiles.map((profile) => `<tr><td>@${escapeHtml(profile.username)}</td><td><input aria-label="Nombre completo" data-profile-name="${profile.id}" value="${escapeHtml(profile.full_name)}"><input aria-label="Teléfono" data-profile-phone="${profile.id}" value="${escapeHtml(profile.phone || "")}" style="margin-top:6px"></td><td><select data-action="role" data-id="${profile.id}"><option value="">Sin rol</option>${Object.entries(roleNames).map(([value, label]) => `<option value="${value}" ${profile.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></td><td><select aria-label="Aliado del usuario" data-profile-ally="${profile.id}"><option value="">Sin aliado</option>${state.allies.map((ally) => `<option value="${ally.id}" ${profile.ally_id === ally.id ? "selected" : ""}>${escapeHtml(ally.name)}</option>`).join("")}</select></td><td>${profile.suspended ? `<span class="badge">Suspendido</span>` : profile.approved ? `<span class="badge green">${profile.online ? "Activo" : "Aprobado"}</span>` : `<span class="badge orange">Pendiente</span>`}</td><td class="user-actions"><button class="button subtle small" data-action="save-profile" data-id="${profile.id}">Guardar</button><button class="button ${profile.suspended ? "success" : "danger"} small" data-action="suspend" data-id="${profile.id}" data-suspended="${profile.suspended}">${profile.suspended ? "Reactivar" : "Suspender"}</button><button class="button danger small" data-action="delete-user" data-id="${profile.id}">Eliminar</button></td></tr>`).join("")}</tbody></table></div><p class="fine-print">Para cuentas con rol Aliado, asigna también el aliado comercial correspondiente. Eliminar acceso conserva el historial.</p>`;
 }
 
 function renderReports() {
@@ -647,8 +796,8 @@ function bindScreenActions() {
 }
 
 function deliveredSummaryFor(orders) {
-  const amount = orders.reduce((sum, order) => sum + Number(order.delivery_fee), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Dinero generado</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Total de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + Number(order.delivery_fee), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (70%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function bindOrderActions() {
@@ -657,16 +806,27 @@ function bindOrderActions() {
   document.querySelectorAll('[data-action="assign"]').forEach((select) => select.addEventListener("change", () => {
     if (select.value) updateOrder(select.dataset.id, "assign_order", { target_courier: select.value });
   }));
+  document.querySelectorAll('[data-action="release"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "release_order")));
+  document.querySelectorAll('[data-action="copy-phone"]').forEach((button) => button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(button.dataset.phone);
+      showToast("Teléfono copiado.");
+    } catch (error) {
+      reportError(new Error(`No se pudo copiar el teléfono: ${error.message}`));
+    }
+  }));
   document.querySelectorAll('[data-action="maps"]').forEach((button) => button.addEventListener("click", () => {
     if (button.dataset.url) window.open(button.dataset.url, "_blank", "noopener,noreferrer");
   }));
-  document.querySelectorAll('[data-action="role"]').forEach((select) => select.addEventListener("change", () => updateProfile(select.dataset.id, { role: select.value || null, approved: Boolean(select.value) })));
   document.querySelectorAll('[data-action="save-profile"]').forEach((button) => button.addEventListener("click", () => {
     const id = button.dataset.id;
     const full_name = document.querySelector(`[data-profile-name="${id}"]`).value.trim();
     const phone = document.querySelector(`[data-profile-phone="${id}"]`).value.trim();
     if (!full_name || !phone) return showToast("Nombre y teléfono son obligatorios.", true);
-    updateProfile(id, { full_name, phone });
+    const role = document.querySelector(`[data-action="role"][data-id="${id}"]`).value || null;
+    const allyId = document.querySelector(`[data-profile-ally="${id}"]`).value || null;
+    if (role === "aliado" && !allyId) return showToast("Asigna un aliado comercial a este usuario.", true);
+    updateProfile(id, { full_name, phone, role, approved: Boolean(role), ally_id: role === "aliado" ? allyId : null });
   }));
   document.querySelectorAll('[data-action="suspend"]').forEach((button) => button.addEventListener("click", () => updateProfile(button.dataset.id, { suspended: button.dataset.suspended !== "true", online: false })));
   document.querySelectorAll('[data-action="delete-user"]').forEach((button) => button.addEventListener("click", () => deleteUser(button.dataset.id)));
@@ -692,10 +852,13 @@ async function createOrder(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   const mapsUrl = String(data.get("mapsUrl")).trim();
-  const assignedCourier = document.querySelector("#assign-courier-toggle").checked;
+  const isAlly = state.profile.role === "aliado";
+  const assignedCourier = !isAlly && Boolean(document.querySelector("#assign-courier-toggle")?.checked);
+  const allyId = isAlly ? state.profile.ally_id : data.get("allyId");
+  if (!allyId) return showToast("Esta cuenta no tiene un aliado asignado. Contacta a administración.", true);
   if (!/^https?:\/\/\S+$/i.test(mapsUrl)) return showToast("La ubicación debe ser una URL http o https.", true);
   const { data: orderId, error } = await supabase.rpc("create_order", {
-    p_ally_id: data.get("allyId"),
+    p_ally_id: allyId,
     p_client_name: String(data.get("clientName")).trim(),
     p_client_phone: String(data.get("clientPhone")).trim(),
     p_address: String(data.get("address")).trim(),
@@ -704,8 +867,8 @@ async function createOrder(event) {
     p_courier_id: assignedCourier ? data.get("courierId") : null
   });
   if (error) return reportError(error);
-  showToast(assignedCourier ? "Pedido creado y asignado al motorizado." : "Pedido creado y disponible para los motorizados.");
-  state.screen = "pedidos";
+  showToast(isAlly ? "Pedido enviado a soporte; ningún motorizado lo verá todavía." : assignedCourier ? "Pedido creado y asignado al motorizado." : "Pedido creado y disponible para los motorizados.");
+  state.screen = isAlly ? "mis_pedidos" : "pedidos";
   await refreshData(false);
   renderApp();
   applyPendingServiceWorkerUpdate();
@@ -714,8 +877,11 @@ async function createOrder(event) {
 
 async function createAlly(event) {
   event.preventDefault();
-  const name = new FormData(event.currentTarget).get("name").toString().trim();
-  const { error } = await supabase.from("allies").insert({ name });
+  const form = new FormData(event.currentTarget);
+  const name = form.get("name").toString().trim();
+  const locationUrl = form.get("locationUrl").toString().trim();
+  if (locationUrl && !/^https?:\/\/\S+$/i.test(locationUrl)) return showToast("La ubicación debe ser una URL http o https.", true);
+  const { error } = await supabase.from("allies").insert({ name, location_url: locationUrl || null });
   if (error) return reportError(error);
   showToast("Aliado agregado.");
   await refreshData(false);
@@ -744,7 +910,7 @@ async function deleteUser(id) {
 async function updateOrder(id, action, args = {}) {
   const { error } = await supabase.rpc(action, { order_id: id, ...args });
   if (error) return reportError(error);
-  showToast(action === "claim_order" ? "Pedido asignado a tu cuenta." : action === "assign_order" ? "Pedido asignado al motorizado." : "Estado del pedido actualizado.");
+  showToast(action === "claim_order" ? "Pedido asignado a tu cuenta." : action === "assign_order" ? "Pedido asignado al motorizado." : action === "release_order" ? "Pedido liberado para motorizados activos." : "Estado del pedido actualizado.");
   await refreshData(true);
   renderApp();
 }
@@ -752,6 +918,7 @@ async function updateOrder(id, action, args = {}) {
 async function updateProfile(id, changes) {
   const { error } = await supabase.from("profiles").update(changes).eq("id", id);
   if (error) return reportError(error);
+  if (id === state.profile.id) state.profile = { ...state.profile, ...changes };
   showToast("Usuario actualizado.");
   await refreshData(false);
   renderApp();

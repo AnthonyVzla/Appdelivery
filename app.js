@@ -13,6 +13,20 @@ function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 
+function legalFooter() {
+  return `<footer class="legal-footer">Derechos reservados · A un paso RIF: J-503180226 <span>POWERED BY BAMBAMDEV</span></footer>`;
+}
+
+function renderAudioActivationPrompt() {
+  if (state.profile.role === "motorizado" && !state.alertsEnabled) {
+    return `<aside class="audio-activation" role="status"><div><strong>Activa las alertas de pedidos</strong><p>Permite el sonido de pedidos entrantes y asignados en este dispositivo.</p></div><button class="button primary" data-action="alerts">Activar alertas</button></aside>`;
+  }
+  if (["soporte", "administracion"].includes(state.profile.role) && !state.overdueSoundsEnabled) {
+    return `<aside class="audio-activation" role="status"><div><strong>Activa la alarma de retrasos</strong><p>Habilita el sonido para pedidos que superen los 10 minutos sin llegar al comercio.</p></div><button class="button primary" data-action="overdue-sound">Activar alarma</button></aside>`;
+  }
+  return "";
+}
+
 function formatMoney(value) {
   return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(Number(value || 0));
 }
@@ -175,7 +189,7 @@ function startRealtime() {
 function renderAuth() {
   const isRegister = state.authMode === "register";
   app.innerHTML = `
-    <section class="auth-shell"><div class="auth-card">
+    <div class="auth-page"><section class="auth-shell"><div class="auth-card">
       <img class="brand-logo" src="./images (1).png" alt="A un paso delivery">
       <p class="eyebrow">GESTIÓN DE ENTREGAS</p>
       <h1>${isRegister ? "Crea tu cuenta" : "Bienvenido"}</h1>
@@ -189,7 +203,7 @@ function renderAuth() {
       </form>
       <button class="text-button" id="auth-toggle">${isRegister ? "¿Ya tienes cuenta? Iniciar sesión" : "¿No tienes cuenta? Crear cuenta"}</button>
       <p class="fine-print">El acceso a cuentas nuevas requiere aprobación de administración.</p>
-    </div></section>`;
+    </div></section>${legalFooter()}</div>`;
   document.querySelector("#auth-toggle").addEventListener("click", () => {
     state.authMode = isRegister ? "login" : "register";
     renderAuth();
@@ -242,12 +256,12 @@ async function submitAuth(event) {
 
 function renderPending() {
   const suspended = state.profile?.suspended;
-  app.innerHTML = `<section class="auth-shell"><div class="auth-card">
+  app.innerHTML = `<div class="auth-page"><section class="auth-shell"><div class="auth-card">
     <img class="brand-logo" src="./images (1).png" alt="A un paso delivery">
     <p class="eyebrow">A UN PASO DELIVERY</p><h1>${suspended ? "Cuenta suspendida" : "Solicitud recibida"}</h1>
     <p class="muted">${suspended ? "Tu acceso está suspendido. Comunícate con administración." : "Tu cuenta aún no está habilitada. Podrás ingresar cuando administración apruebe tu usuario y asigne un rol."}</p>
     <button class="button subtle full" id="logout-button">Cerrar sesión</button>
-  </div></section>`;
+  </div></section>${legalFooter()}</div>`;
   document.querySelector("#logout-button").addEventListener("click", signOut);
 }
 
@@ -326,7 +340,7 @@ function renderApp() {
   const items = navItems[state.profile.role] || [];
   if (!items.some(([key]) => key === state.screen)) state.screen = items[0]?.[0] || "inicio";
   const nav = items.map(([key, label]) => `<button class="nav-button ${state.screen === key ? "active" : ""}" data-screen="${key}">${label}</button>`).join("");
-  app.innerHTML = `<div class="layout">
+  app.innerHTML = `<div class="app-page"><div class="layout">
     <aside class="sidebar">
       <div class="sidebar-brand"><img src="./images (1).png" alt=""><div><strong>A un paso<br>delivery</strong><span>${roleNames[state.profile.role]}</span></div></div>
       <nav class="nav-list">${nav}</nav>
@@ -336,10 +350,11 @@ function renderApp() {
       <header class="topbar"><div><div class="mobile-brand"><img src="./images (1).png" alt=""><strong>A un paso delivery</strong></div><h1>${escapeHtml(titleFor(state.screen))}</h1><p>${new Intl.DateTimeFormat("es-CO", { dateStyle: "full" }).format(new Date())}</p></div>
         ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label><button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button></div>` : `<div class="header-actions">${["soporte", "administracion"].includes(state.profile.role) ? `<button class="button subtle small" data-action="overdue-sound" aria-pressed="${state.overdueSoundsEnabled}">${state.overdueSoundsEnabled ? "Alarma activada" : "Activar alarma"}</button><span class="badge green">${countOnline()} motorizados activos</span>` : ""}${["soporte", "administracion", "aliado"].includes(state.profile.role) ? `<button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button>` : ""}</div>`}
       </header>
+      ${renderAudioActivationPrompt()}
       <section id="screen-content">${renderScreen()}</section>
     </main>
     <nav class="mobile-nav">${nav}</nav>
-  </div>`;
+  </div>${legalFooter()}</div>`;
   app.querySelectorAll("[data-screen]").forEach((button) => button.addEventListener("click", () => {
     state.screen = button.dataset.screen;
     renderApp();
@@ -352,6 +367,10 @@ function renderApp() {
   if (alertsButton) alertsButton.addEventListener("click", toggleCourierAlerts);
   const overdueSoundButton = app.querySelector('[data-action="overdue-sound"]');
   if (overdueSoundButton) overdueSoundButton.addEventListener("click", enableOverdueSounds);
+  const activationButton = app.querySelector(".audio-activation [data-action]");
+  if (activationButton) {
+    activationButton.addEventListener("click", activationButton.dataset.action === "alerts" ? toggleCourierAlerts : enableOverdueSounds);
+  }
   bindScreenActions();
 }
 

@@ -85,6 +85,7 @@ textarea { min-height: 82px; resize: vertical; }
 .deadline { display: inline-flex; margin-top: 12px; padding: 6px 9px; border-radius: 8px; color: #ffd18c; background: #df9b351e; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .deadline.overdue { color: #fff; background: #c62e42; animation: overdue-pulse 1.2s ease-in-out infinite alternate; }
 .courier-earnings { align-self: center; font-size: 12px; }
+.merchant-location { display: flex; justify-content: center; margin-top: 12px; }
 .mobile-logout { display: none; }
 @keyframes overdue-pulse { to { box-shadow: 0 0 16px #ff405966; } }
 .order-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }

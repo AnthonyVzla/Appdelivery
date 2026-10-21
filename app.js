@@ -14,7 +14,7 @@ function escapeHtml(value = "") {
 }
 
 function formatMoney(value) {
-  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Number(value || 0));
+  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(Number(value || 0));
 }
 
 function dateTime(value) {
@@ -538,7 +538,7 @@ function courierEarnings(order) {
 }
 
 function orderDeadline(order) {
-  if (order.status === "pending") return new Date(order.created_at).getTime() + 10 * 60 * 1000;
+  if (order.status === "pending") return new Date(order.assigned_at || order.created_at).getTime() + 10 * 60 * 1000;
   if (order.status === "assigned" && !order.at_store_at) return new Date(order.assigned_at || order.created_at).getTime() + 10 * 60 * 1000;
   return null;
 }
@@ -641,12 +641,15 @@ function renderOrderCards(orders, context = "") {
       const next = { assigned: ["at_store", "Llegada al comercio"], at_store: ["in_transit", "Pedido en camino"], in_transit: ["delivered", "Pedido entregado"] }[order.status];
       if (next) buttons.push(`<button class="button ${next[0] === "delivered" ? "success" : "primary"} small" data-action="advance" data-status="${next[0]}" data-id="${order.id}">${next[1]}</button>`);
       buttons.push(`<button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.maps_url || "")}">Abrir ubicación</button>`);
-      if (order.allies?.location_url) buttons.push(`<button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button>`);
       buttons.push(`<button class="button subtle small" data-action="copy-phone" data-phone="${escapeHtml(order.client_phone)}">Copiar teléfono</button>`);
       buttons.push(`<a class="button success small" target="_blank" rel="noopener noreferrer" href="${whatsappUrl(order.client_phone, allyName)}">Contactar cliente</a>`);
     }
     if (context === "pending" && !order.released) buttons.push(`<button class="button primary small" data-action="release" data-id="${order.id}">Liberar pedido</button>`);
-    if (["staff", "pending"].includes(context) && ["administracion", "soporte"].includes(state.profile.role) && order.status !== "delivered") {
+    if (context === "staff" && order.status === "assigned" && !order.at_store_at && ["administracion", "soporte"].includes(state.profile.role)) {
+      buttons.push(`<label class="assign-control">Nuevo motorizado<select data-reassign-select="${order.id}"><option value="">Selecciona un motorizado activo…</option>${activeCouriers().filter((profile) => profile.id !== order.courier_id).map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
+      buttons.push(`<button class="button primary small" data-action="reassign" data-id="${order.id}">Reasignar pedido</button>`);
+      buttons.push(`<button class="button subtle small" data-action="release" data-id="${order.id}">Liberar para que otro lo tome</button>`);
+    } else if (["staff", "pending"].includes(context) && ["administracion", "soporte"].includes(state.profile.role) && order.status === "pending") {
       buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${state.profiles.filter((profile) => profile.role === "motorizado" && profile.approved && !profile.suspended).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     const isCourier = state.profile.role === "motorizado";
@@ -656,6 +659,7 @@ function renderOrderCards(orders, context = "") {
       : statusBadge(order.status);
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
       ${renderDeadline(order)}
+      ${context === "current" && order.allies?.location_url ? `<div class="merchant-location"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button></div>` : ""}
       <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br>${priceLabel}</p>
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
@@ -807,6 +811,11 @@ function bindOrderActions() {
     if (select.value) updateOrder(select.dataset.id, "assign_order", { target_courier: select.value });
   }));
   document.querySelectorAll('[data-action="release"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "release_order")));
+  document.querySelectorAll('[data-action="reassign"]').forEach((button) => button.addEventListener("click", () => {
+    const select = document.querySelector(`[data-reassign-select="${button.dataset.id}"]`);
+    if (!select?.value) return showToast("Selecciona el motorizado que recibirá el pedido.", true);
+    updateOrder(button.dataset.id, "assign_order", { target_courier: select.value });
+  }));
   document.querySelectorAll('[data-action="copy-phone"]').forEach((button) => button.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(button.dataset.phone);

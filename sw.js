@@ -1,7 +1,7 @@
 const BUILD_VERSION = "__BUILD_VERSION__";
 const CACHE_PREFIX = "a-un-paso-";
 const CACHE_NAME = `${CACHE_PREFIX}${BUILD_VERSION}`;
-const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest", "./images%20(1).png"];
+const APP_SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest", "./images%20(1).png", "./email-notification-message-ring.wav", "./classic-danger-alarm.mp3"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {

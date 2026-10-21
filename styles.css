@@ -92,6 +92,7 @@ textarea { min-height: 82px; resize: vertical; }
 .order-top h3 { font-size: 16px; margin-bottom: 5px; }
 .order-top p, .order-detail { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0; overflow-wrap: anywhere; }
 .order-detail { margin-top: 12px; color: #d3cfd8; }
+.courier-work { margin: 8px 0 0; color: #e8e5eb; font-size: 12px; line-height: 1.6; }
 .order-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .badge { display: inline-flex; border-radius: 20px; padding: 5px 9px; color: #efb1e7; background: #d936bc23; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .badge.green { color: #81e7b7; background: #42d3921b; }

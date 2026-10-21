@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, audioContext: null, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -114,7 +114,7 @@ async function loadProfile() {
   }
   state.profile = data;
   state.notifiedOrders.clear();
-  state.alertsEnabled = localStorage.getItem(`aunpaso-alerts-${data.id}`) === "true";
+  state.alertsEnabled = false;
   if (!data.approved || !data.role || data.suspended) {
     renderPending();
     return;
@@ -358,52 +358,55 @@ function renderApp() {
 async function toggleCourierAlerts() {
   if (state.alertsEnabled) {
     state.alertsEnabled = false;
-    localStorage.setItem(`aunpaso-alerts-${state.profile.id}`, "false");
     showToast("Alertas de sonido y vibración desactivadas.");
     renderApp();
     return;
   }
 
   try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (AudioContextClass) {
-      state.audioContext ||= new AudioContextClass();
-      if (state.audioContext.state === "suspended") await state.audioContext.resume();
-    }
-    if ("Notification" in window && Notification.permission === "default") {
-      await Notification.requestPermission();
-    }
+    await prepareAlertAudio("incoming");
     state.alertsEnabled = true;
-    localStorage.setItem(`aunpaso-alerts-${state.profile.id}`, "true");
-    playCourierAlert("incoming");
-    showToast("Alertas activadas. El teléfono sonará y vibrará con pedidos nuevos.");
+    showToast("Sonido de pedidos probado y alertas activadas para esta sesión.");
     renderApp();
   } catch (error) {
     reportError(new Error(`No se pudieron activar las alertas: ${error.message}`));
   }
 }
 
-function playCourierAlert(kind) {
-  if (!state.alertsEnabled) return;
-  const audio = state.audioContext;
-  if (audio?.state === "running") {
-    const notes = kind === "assigned" ? [740, 988, 740, 988] : [587, 784, 988];
-    const startAt = audio.currentTime;
-    notes.forEach((frequency, index) => {
-      const oscillator = audio.createOscillator();
-      const gain = audio.createGain();
-      const noteStart = startAt + index * 0.16;
-      oscillator.type = "sine";
-      oscillator.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.0001, noteStart);
-      gain.gain.exponentialRampToValueAtTime(0.14, noteStart + 0.025);
-      gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
-      oscillator.connect(gain);
-      gain.connect(audio.destination);
-      oscillator.start(noteStart);
-      oscillator.stop(noteStart + 0.14);
-    });
+function alertAudioFor(kind) {
+  const source = kind === "overdue"
+    ? "./classic-danger-alarm.mp3"
+    : "./email-notification-message-ring.wav";
+  if (!state.alertAudio[kind]) {
+    const audio = new Audio(source);
+    audio.preload = "auto";
+    audio.volume = 1;
+    state.alertAudio[kind] = audio;
   }
+  return state.alertAudio[kind];
+}
+
+async function prepareAlertAudio(kind) {
+  const audio = alertAudioFor(kind);
+  audio.currentTime = 0;
+  await audio.play();
+}
+
+async function playAlertAudio(kind) {
+  const audio = alertAudioFor(kind);
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+    await audio.play();
+  } catch (error) {
+    console.error(`No se pudo reproducir el audio ${kind}:`, error);
+    showToast("El navegador bloqueó el sonido. Pulsa Activar alertas o Activar alarma para habilitar el audio.", true);
+  }
+}
+
+async function playCourierAlert(kind) {
+  if (!state.alertsEnabled) return;
+  await playAlertAudio("incoming");
   if (typeof navigator.vibrate === "function") {
     navigator.vibrate(kind === "assigned" ? [350, 120, 350, 120, 500] : [180, 90, 180]);
   }
@@ -416,30 +419,7 @@ async function notifyCourier(kind, order) {
     : `Nuevo pedido disponible de ${allyName}.`;
   showToast(message);
   if (!state.alertsEnabled) return;
-  playCourierAlert(kind);
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  try {
-    const registration = await navigator.serviceWorker?.ready;
-    if (registration) {
-      await registration.showNotification(kind === "assigned" ? "Pedido asignado" : "Nuevo pedido disponible", {
-        body: `${allyName} · ${order.client_name}`,
-        icon: "./images (1).png",
-        tag: `order-${order.id}-${kind}`,
-        renotify: true,
-        vibrate: kind === "assigned" ? [350, 120, 350, 120, 500] : [180, 90, 180],
-        data: { url: "./" }
-      });
-    } else {
-      new Notification(kind === "assigned" ? "Pedido asignado" : "Nuevo pedido disponible", {
-        body: `${allyName} · ${order.client_name}`,
-        icon: "./images (1).png",
-        tag: `order-${order.id}-${kind}`
-      });
-    }
-
-  } catch (error) {
-    console.error("No se pudo mostrar la notificación del pedido:", error);
-  }
+  await playCourierAlert(kind);
 }
 
 function emitCourierNotification(kind, order) {
@@ -501,7 +481,12 @@ function renderAllyOrders(history) {
 function renderActiveCouriers() {
   const couriers = activeCouriers();
   if (!couriers.length) return `<div class="empty">No hay motorizados activos en este momento.</div>`;
-  return `<div class="list">${couriers.map((profile) => `<article class="card order-top"><div><h3>${escapeHtml(profile.full_name)}</h3><p>@${escapeHtml(profile.username)} · ${escapeHtml(profile.phone || "Sin teléfono")}</p><p class="muted">Última conexión: ${dateTime(profile.last_seen_at)}</p></div><span class="badge green">Activo</span></article>`).join("")}</div>`;
+  return `<p class="muted">Estado de disponibilidad de cada motorizado conectado.</p><div class="list">${couriers.map((profile) => {
+    const currentOrders = state.orders.filter((order) => order.courier_id === profile.id && ["assigned", "at_store", "in_transit"].includes(order.status));
+    const isBusy = currentOrders.length > 0;
+    const orderDetails = currentOrders.map((order) => `${escapeHtml(order.allies?.name || "Aliado")} · ${escapeHtml(order.client_name)} (#${order.id.slice(0, 8)}) — ${statusNames[order.status]}`).join("<br>");
+    return `<article class="card order-top"><div><h3>${escapeHtml(profile.full_name)}</h3><p>@${escapeHtml(profile.username)} · ${escapeHtml(profile.phone || "Sin teléfono")}</p><p class="muted">Última conexión: ${dateTime(profile.last_seen_at)}</p>${isBusy ? `<p class="courier-work"><strong>Pedido${currentOrders.length > 1 ? "s" : ""} en curso:</strong><br>${orderDetails}</p>` : ""}</div><span class="badge ${isBusy ? "orange" : "green"}">${isBusy ? "Ocupado" : "Disponible"}</span></article>`;
+  }).join("")}</div>`;
 }
 
 function renderDashboard() {
@@ -583,7 +568,7 @@ function updateOverdueClocks() {
     state.overdueAlarmTimes.set(order.id, now);
     shouldAlarm = true;
   }
-  if (shouldAlarm) playOverdueAlarm();
+  if (shouldAlarm) void playOverdueAlarm();
 }
 
 async function enableOverdueSounds() {
@@ -594,36 +579,18 @@ async function enableOverdueSounds() {
     return;
   }
   try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) throw new Error("Este navegador no permite reproducir la alarma.");
-    state.audioContext ||= new AudioContextClass();
-    if (state.audioContext.state === "suspended") await state.audioContext.resume();
+    await prepareAlertAudio("overdue");
     state.overdueSoundsEnabled = true;
-    showToast("Alarma de pedidos retrasados activada en este dispositivo.");
+    showToast("Alarma activada con el audio de peligro clásico.");
     renderApp();
-    playOverdueAlarm();
   } catch (error) {
     reportError(error);
   }
 }
 
-function playOverdueAlarm() {
-  const audio = state.audioContext;
-  if (!state.overdueSoundsEnabled || audio?.state !== "running") return;
-  [880, 660, 880].forEach((frequency, index) => {
-    const oscillator = audio.createOscillator();
-    const gain = audio.createGain();
-    const startAt = audio.currentTime + index * 0.24;
-    oscillator.type = "square";
-    oscillator.frequency.value = frequency;
-    gain.gain.setValueAtTime(0.0001, startAt);
-    gain.gain.exponentialRampToValueAtTime(0.12, startAt + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.18);
-    oscillator.connect(gain);
-    gain.connect(audio.destination);
-    oscillator.start(startAt);
-    oscillator.stop(startAt + 0.2);
-  });
+async function playOverdueAlarm() {
+  if (!state.overdueSoundsEnabled) return;
+  await playAlertAudio("overdue");
 }
 
 function renderOrderCards(orders, context = "") {
@@ -745,9 +712,16 @@ function renderReports() {
   const delivered = state.orders.filter((order) => order.status === "delivered");
   const todayDelivered = delivered.filter((order) => new Date(order.delivered_at) >= dayStart());
   const createdToday = state.orders.filter((order) => new Date(order.created_at) >= dayStart());
+  const couriers = state.profiles.filter((profile) => profile.role === "motorizado");
   return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${todayDelivered.length} entregados</span></article><article class="card"><span class="metric-label">Delivery generado hoy</span><div class="metric-value">${formatMoney(todayDelivered.reduce((sum, order) => sum + Number(order.delivery_fee), 0))}</div></article><article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${countOnline()}</div></article></div>
-    <div class="section-head"><h2>Reportes de entregas</h2></div><div class="toolbar"><label>Desde<input type="date" id="report-from"></label><label>Hasta<input type="date" id="report-to"></label><button class="button primary" data-action="export">Descargar reporte Excel</button></div>
-    <div id="report-table" class="table-wrap">${reportTable(delivered)}</div>`;
+    <div class="section-head"><h2>Reportes de entregas</h2></div><div class="toolbar">
+      <label>Desde<input type="date" id="report-from"></label>
+      <label>Hasta<input type="date" id="report-to"></label>
+      <label>Motorizado<select id="report-courier"><option value="">Todos los motorizados</option>${couriers.map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>
+      <label>Aliado<select id="report-ally"><option value="">Todos los aliados</option>${state.allies.map((ally) => `<option value="${ally.id}">${escapeHtml(ally.name)}</option>`).join("")}</select></label>
+      <button class="button primary" data-action="export">Descargar reporte Excel</button>
+    </div>
+    <div id="report-table" class="table-wrap">${reportTable(reportOrders())}</div>`;
 }
 
 function reportTable(orders) {
@@ -757,7 +731,15 @@ function reportTable(orders) {
 function reportOrders() {
   const from = document.querySelector("#report-from")?.value;
   const to = document.querySelector("#report-to")?.value;
-  return state.orders.filter((order) => order.status === "delivered" && (!from || new Date(order.delivered_at) >= new Date(`${from}T00:00:00`)) && (!to || new Date(order.delivered_at) < new Date(`${to}T23:59:59.999`)));
+  const courierId = document.querySelector("#report-courier")?.value;
+  const allyId = document.querySelector("#report-ally")?.value;
+  const endExclusive = to ? new Date(`${to}T00:00:00`) : null;
+  if (endExclusive) endExclusive.setDate(endExclusive.getDate() + 1);
+  return state.orders.filter((order) => order.status === "delivered"
+    && (!from || new Date(order.delivered_at) >= new Date(`${from}T00:00:00`))
+    && (!endExclusive || new Date(order.delivered_at) < endExclusive)
+    && (!courierId || order.courier_id === courierId)
+    && (!allyId || order.ally_id === allyId));
 }
 
 function bindScreenActions() {
@@ -793,7 +775,7 @@ function bindScreenActions() {
       document.querySelector("#delivered-results").innerHTML = deliveredSummaryFor(orders);
     }
   }));
-  document.querySelectorAll("#report-from, #report-to").forEach((input) => input.addEventListener("change", () => {
+  document.querySelectorAll("#report-from, #report-to, #report-courier, #report-ally").forEach((input) => input.addEventListener("change", () => {
     document.querySelector("#report-table").innerHTML = reportTable(reportOrders());
   }));
   bindOrderActions();

@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -66,6 +66,7 @@ async function boot() {
   supabase.auth.onAuthStateChange((_event, session) => {
     if (!session) {
       clearInterval(state.refreshTimer);
+      stopCourierLocationTracking();
       state.session = null;
       state.profile = null;
       renderAuth();
@@ -119,6 +120,7 @@ function applyPendingServiceWorkerUpdate() {
 }
 
 async function loadProfile() {
+  stopCourierLocationTracking();
   const { data, error } = await supabase.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle();
   if (error) return reportError(error);
   if (!data) {
@@ -127,6 +129,8 @@ async function loadProfile() {
     return;
   }
   state.profile = data;
+  state.courierLocations = [];
+  state.monitoringLocationLoadError = false;
   state.notifiedOrders.clear();
   state.alertsEnabled = false;
   if (!data.approved || !data.role || data.suspended) {
@@ -139,6 +143,7 @@ async function loadProfile() {
   }
   await refreshData(false);
   renderApp();
+  if (state.profile.role === "motorizado" && state.profile.online) startCourierLocationTracking();
   startRealtime();
   clearInterval(state.refreshTimer);
   clearInterval(state.overdueTimer);
@@ -157,6 +162,10 @@ async function loadProfile() {
 
 function renderIfSafe() {
   if (state.screen === "crear") return;
+  if (state.screen === "monitoreo") {
+    refreshMonitoringView();
+    return;
+  }
   if (app.querySelector("input:focus, textarea:focus, select:focus")) return;
   if (!hasUnsavedFormData()) renderApp();
 }
@@ -180,10 +189,66 @@ function startRealtime() {
       await refreshData(true);
       renderIfSafe();
     });
+    if (["soporte", "administracion"].includes(state.profile.role)) {
+      channel.on("postgres_changes", { event: "*", schema: "public", table: "courier_locations" }, async () => {
+        await refreshCourierLocations();
+        renderIfSafe();
+      });
+    }
   }
+
   state.realtime = channel.subscribe((status) => {
     if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") console.error(`Supabase Realtime: ${status}`);
   });
+}
+
+function stopCourierLocationTracking() {
+  if (state.courierLocationWatchId !== null && "geolocation" in navigator) {
+    navigator.geolocation.clearWatch(state.courierLocationWatchId);
+  }
+  state.courierLocationWatchId = null;
+  state.courierLocationWritePending = false;
+  state.lastCourierLocationSentAt = 0;
+}
+
+function startCourierLocationTracking() {
+  if (state.profile?.role !== "motorizado" || !state.profile.online || !("geolocation" in navigator)) {
+    if (state.profile?.role === "motorizado" && state.profile.online && !("geolocation" in navigator)) {
+      state.courierLocationError = "Este navegador no permite compartir la ubicación.";
+      showToast(state.courierLocationError, true);
+    }
+    return;
+  }
+  if (state.courierLocationWatchId !== null) return;
+  state.courierLocationError = "";
+  state.courierLocationWatchId = navigator.geolocation.watchPosition(async (position) => {
+    if (!state.profile?.online || state.courierLocationWritePending || Date.now() - state.lastCourierLocationSentAt < 15000) return;
+    state.courierLocationWritePending = true;
+    try {
+      const { error } = await supabase.rpc("update_courier_location", {
+        p_latitude: position.coords.latitude,
+        p_longitude: position.coords.longitude,
+        p_accuracy: position.coords.accuracy
+      });
+      if (error) throw error;
+      if (!state.profile?.online) return;
+      state.lastCourierLocationSentAt = Date.now();
+      state.courierLocationError = "";
+    } catch (error) {
+      console.error("No se pudo guardar la ubicación del motorizado:", error);
+      state.courierLocationError = "No se pudo actualizar tu ubicación. Verifica tu conexión y los permisos de Supabase.";
+      showToast(state.courierLocationError, true);
+      stopCourierLocationTracking();
+    } finally {
+      state.courierLocationWritePending = false;
+    }
+  }, (error) => {
+    stopCourierLocationTracking();
+    state.courierLocationError = error.code === error.PERMISSION_DENIED
+      ? "Permiso de ubicación denegado. Actívalo en los ajustes del navegador para aparecer en Monitoreo."
+      : "No se pudo obtener la ubicación. Comprueba el GPS del teléfono e inténtalo de nuevo.";
+    showToast(state.courierLocationError, true);
+  }, { enableHighAccuracy: false, maximumAge: 15000, timeout: 20000 });
 }
 
 function renderAuth() {
@@ -297,8 +362,26 @@ async function refreshData(quiet) {
     }
     state.allies = allyResult.data || [];
     state.profiles = profileResult.data || [];
+    if (["soporte", "administracion"].includes(state.profile.role)) await refreshCourierLocations(quiet);
     refreshActiveCourierOptions();
   }
+}
+
+async function refreshCourierLocations(quiet = true) {
+  if (!["soporte", "administracion"].includes(state.profile?.role)) return;
+  const freshAfter = new Date(Date.now() - 90000).toISOString();
+  const { data, error } = await supabase.from("courier_locations")
+    .select("courier_id, latitude, longitude, accuracy, updated_at")
+    .gt("updated_at", freshAfter);
+  if (error) {
+    const wasUnavailable = state.monitoringLocationLoadError;
+    state.monitoringLocationLoadError = true;
+    if (!quiet) reportError(error);
+    else if (!wasUnavailable) console.error("No se pudieron cargar las ubicaciones de motorizados:", error);
+    return;
+  }
+  state.monitoringLocationLoadError = false;
+  state.courierLocations = data || [];
 }
 
 function activeCouriers() {
@@ -330,8 +413,8 @@ function refreshActiveCourierOptions() {
 
 const navItems = {
   motorizado: [["inicio", "Resumen"], ["activos", "Pedidos activos"], ["curso", "Pedido en curso"], ["entregados", "Entregados"]],
-  soporte: [["inicio", "Resumen"], ["crear", "Crear pedido"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["aliados", "Aliados"]],
-  administracion: [["inicio", "Resumen"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]],
+  soporte: [["inicio", "Resumen"], ["crear", "Crear pedido"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["monitoreo", "Monitoreo"], ["aliados", "Aliados"]],
+  administracion: [["inicio", "Resumen"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["monitoreo", "Monitoreo"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]],
   aliado: [["crear", "Crear pedido"], ["mis_pedidos", "Pedidos en curso"], ["historial", "Historial"]]
 };
 
@@ -356,6 +439,13 @@ function renderApp() {
     <nav class="mobile-nav">${nav}</nav>
   </div>${legalFooter()}</div>`;
   app.querySelectorAll("[data-screen]").forEach((button) => button.addEventListener("click", () => {
+    if (state.screen === "monitoreo" && button.dataset.screen !== "monitoreo" && state.monitoringMap) {
+      state.monitoringMap.remove();
+      state.monitoringMap = null;
+      state.monitoringMarkers = null;
+      state.monitoringMapContainer = null;
+      state.monitoringMapDidFit = false;
+    }
     state.screen = button.dataset.screen;
     renderApp();
     applyPendingServiceWorkerUpdate();
@@ -372,6 +462,7 @@ function renderApp() {
     activationButton.addEventListener("click", activationButton.dataset.action === "alerts" ? toggleCourierAlerts : enableOverdueSounds);
   }
   bindScreenActions();
+  if (state.screen === "monitoreo") void initializeMonitoringMap();
 }
 
 async function toggleCourierAlerts() {
@@ -452,7 +543,7 @@ function emitCourierNotification(kind, order) {
 }
 
 function titleFor(screen) {
-  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", pendientes: "Pedidos pendientes", mis_pedidos: "Pedidos en curso", historial: "Historial", motorizados: "Motorizados activos", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas" })[screen] || "A un paso delivery";
+  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", pendientes: "Pedidos pendientes", mis_pedidos: "Pedidos en curso", historial: "Historial", motorizados: "Motorizados activos", monitoreo: "Monitoreo", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas" })[screen] || "A un paso delivery";
 }
 
 function countOnline() {
@@ -479,11 +570,13 @@ function renderScreen() {
   if (state.screen === "activos" && role === "motorizado") return renderCourierAvailable();
   if (state.screen === "curso" && role === "motorizado") return renderCourierCurrent();
   if (state.screen === "motorizados" && ["soporte", "administracion"].includes(role)) return renderActiveCouriers();
+  if (state.screen === "monitoreo" && ["soporte", "administracion"].includes(role)) return renderMonitoring();
   if (state.screen === "pedidos" && role !== "motorizado") return renderStaffOrders();
   if (state.screen === "entregados") return role === "motorizado" ? renderCourierDelivered() : renderCompletedOrders();
   if (state.screen === "aliados" && role !== "motorizado") return renderAllies();
   if (state.screen === "usuarios" && role === "administracion") return renderUsers();
-  if ((state.screen === "reportes" || state.screen === "metricas") && role === "administracion") return renderReports();
+  if (state.screen === "reportes" && role === "administracion") return renderReports();
+  if (state.screen === "metricas" && role === "administracion") return renderMetrics();
   return `<div class="empty">Selecciona una sección.</div>`;
 }
 
@@ -506,6 +599,137 @@ function renderActiveCouriers() {
     const orderDetails = currentOrders.map((order) => `${escapeHtml(order.allies?.name || "Aliado")} · ${escapeHtml(order.client_name)} (#${order.id.slice(0, 8)}) — ${statusNames[order.status]}`).join("<br>");
     return `<article class="card order-top"><div><h3>${escapeHtml(profile.full_name)}</h3><p>@${escapeHtml(profile.username)} · ${escapeHtml(profile.phone || "Sin teléfono")}</p><p class="muted">Última conexión: ${dateTime(profile.last_seen_at)}</p>${isBusy ? `<p class="courier-work"><strong>Pedido${currentOrders.length > 1 ? "s" : ""} en curso:</strong><br>${orderDetails}</p>` : ""}</div><span class="badge ${isBusy ? "orange" : "green"}">${isBusy ? "Ocupado" : "Disponible"}</span></article>`;
   }).join("")}</div>`;
+}
+
+function monitoringCouriers() {
+  const positions = new Map(state.courierLocations.map((location) => [location.courier_id, location]));
+  const freshAfter = Date.now() - 90000;
+  return activeCouriers().map((profile) => {
+    const currentOrders = state.orders.filter((order) => order.courier_id === profile.id && ["assigned", "at_store", "in_transit"].includes(order.status));
+    const location = positions.get(profile.id);
+    const locationIsFresh = location && new Date(location.updated_at).getTime() > freshAfter;
+    const busy = currentOrders.length > 0;
+    const orderDescription = currentOrders.map((order) => `${escapeHtml(order.allies?.name || "Aliado")} · #${order.id.slice(0, 8)} · ${statusNames[order.status]}`).join("<br>");
+    const positionDescription = locationIsFresh
+      ? `Ubicación actualizada ${dateTime(location.updated_at)}${location.accuracy ? ` · precisión ±${Math.round(location.accuracy)} m` : ""}`
+      : "Esperando ubicación GPS del teléfono";
+    return `<article class="card monitoring-courier"><div><h3>${escapeHtml(profile.full_name)}</h3><p>${escapeHtml(profile.phone || "Sin teléfono")} · ${positionDescription}</p>${busy ? `<p class="courier-work"><strong>Ocupado:</strong><br>${orderDescription}</p>` : `<p class="courier-work">Disponible para tomar pedidos</p>`}</div><span class="badge ${busy ? "orange" : "green"}">${busy ? "Ocupado" : "Disponible"}</span></article>`;
+  }).join("");
+}
+
+function renderMonitoring() {
+  const couriers = activeCouriers();
+  return `<p class="muted">Ubicaciones recientes de motorizados conectados. La posición se comparte mientras el motorizado está en línea y autorizó el GPS.</p>
+    <p id="monitoring-data-warning" class="error ${state.monitoringLocationLoadError ? "" : "hidden"}">No se pudo consultar la tabla de ubicaciones. Ejecuta la actualización de <code>supabase/schema.sql</code> y verifica los permisos.</p>
+    <div id="monitoring-map" class="monitoring-map" role="application" aria-label="Mapa de motorizados"></div>
+    <p id="monitoring-map-message" class="fine-print">${couriers.length ? "Cargando mapa y ubicaciones..." : "No hay motorizados conectados ahora."}</p>
+    ${state.courierLocationError ? `<p class="error">${escapeHtml(state.courierLocationError)}</p>` : ""}
+    <div id="monitoring-couriers" class="list">${monitoringCouriers() || `<div class="empty">No hay motorizados conectados en este momento.</div>`}</div>
+    <p class="fine-print">El mapa usa Leaflet y datos cartográficos de OpenStreetMap. El seguimiento se detiene cuando el motorizado cambia a OFF o cierra sesión.</p>`;
+}
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve(window.L);
+  if (state.leafletPromise) return state.leafletPromise;
+  state.leafletPromise = new Promise((resolve, reject) => {
+    if (!document.querySelector('link[data-leaflet="true"]')) {
+      const stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      stylesheet.dataset.leaflet = "true";
+      document.head.appendChild(stylesheet);
+    }
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.async = true;
+    script.onload = () => resolve(window.L);
+    script.onerror = () => {
+      state.leafletPromise = null;
+      reject(new Error("No se pudo cargar Leaflet. Comprueba la conexión a internet."));
+    };
+    document.head.appendChild(script);
+  });
+  return state.leafletPromise;
+}
+
+async function initializeMonitoringMap() {
+  const container = document.querySelector("#monitoring-map");
+  if (!container) return;
+  try {
+    const leaflet = await loadLeaflet();
+    if (state.screen !== "monitoreo" || !container.isConnected) return;
+    if (state.monitoringMap && state.monitoringMapContainer !== container) {
+      state.monitoringMap.remove();
+      state.monitoringMap = null;
+      state.monitoringMarkers = null;
+      state.monitoringMapDidFit = false;
+    }
+    if (!state.monitoringMap) {
+      state.monitoringMapContainer = container;
+      state.monitoringMap = leaflet.map(container).setView([10.5, -66.9], 5);
+      leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
+      }).addTo(state.monitoringMap);
+      state.monitoringMarkers = leaflet.layerGroup().addTo(state.monitoringMap);
+    }
+    refreshMonitoringMap();
+  } catch (error) {
+    console.error("No se pudo inicializar el mapa de monitoreo:", error);
+    const message = document.querySelector("#monitoring-map-message");
+    if (message) message.textContent = error.message;
+  }
+}
+
+function monitoringLocations() {
+  const profiles = new Map(activeCouriers().map((profile) => [profile.id, profile]));
+  const freshAfter = Date.now() - 90000;
+  return state.courierLocations
+    .filter((location) => profiles.has(location.courier_id) && new Date(location.updated_at).getTime() > freshAfter)
+    .map((location) => ({ ...location, profile: profiles.get(location.courier_id) }));
+}
+
+function refreshMonitoringMap() {
+  if (!state.monitoringMap || !state.monitoringMarkers) return;
+  const leaflet = window.L;
+  const locations = monitoringLocations();
+  state.monitoringMarkers.clearLayers();
+  const bounds = [];
+
+  for (const location of locations) {
+    const busy = state.orders.some((order) => order.courier_id === location.courier_id && ["assigned", "at_store", "in_transit"].includes(order.status));
+    const name = escapeHtml(location.profile.full_name);
+    const marker = leaflet.circleMarker([location.latitude, location.longitude], {
+      radius: 9,
+      color: busy ? "#ff707b" : "#42d392",
+      fillColor: busy ? "#ff707b" : "#42d392",
+      fillOpacity: 0.9,
+      weight: 2
+    });
+    marker.bindPopup(`<strong>${name}</strong><br>${busy ? "Ocupado" : "Disponible"}<br>Actualizado: ${dateTime(location.updated_at)}`);
+    marker.addTo(state.monitoringMarkers);
+    bounds.push([location.latitude, location.longitude]);
+  }
+
+  if (bounds.length && !state.monitoringMapDidFit) {
+    state.monitoringMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+    state.monitoringMapDidFit = true;
+  }
+  const message = document.querySelector("#monitoring-map-message");
+  if (message) {
+    message.textContent = locations.length
+      ? `${locations.length} ubicación${locations.length === 1 ? "" : "es"} reciente${locations.length === 1 ? "" : "s"} en el mapa.`
+      : "No hay posiciones GPS recientes. Verifica que los motorizados estén en línea y hayan permitido la ubicación.";
+  }
+}
+
+function refreshMonitoringView() {
+  const list = document.querySelector("#monitoring-couriers");
+  if (!list) return;
+  const warning = document.querySelector("#monitoring-data-warning");
+  warning?.classList.toggle("hidden", !state.monitoringLocationLoadError);
+  list.innerHTML = monitoringCouriers() || `<div class="empty">No hay motorizados conectados en este momento.</div>`;
+  refreshMonitoringMap();
 }
 
 function renderDashboard() {
@@ -743,6 +967,79 @@ function renderReports() {
     <div id="report-table" class="table-wrap">${reportTable(reportOrders())}</div>`;
 }
 
+function averageDurationSeconds(orders, startField, endField) {
+  const durations = orders
+    .filter((order) => order[startField] && order[endField])
+    .map((order) => (new Date(order[endField]).getTime() - new Date(order[startField]).getTime()) / 1000)
+    .filter((seconds) => Number.isFinite(seconds) && seconds >= 0);
+  if (!durations.length) return null;
+  return durations.reduce((total, seconds) => total + seconds, 0) / durations.length;
+}
+
+function formatDuration(seconds) {
+  if (seconds === null) return "—";
+  const totalSeconds = Math.round(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (hours) return `${hours} h ${minutes} min`;
+  if (minutes) return `${minutes} min ${remainingSeconds} s`;
+  return `${remainingSeconds} s`;
+}
+
+function renderMetrics() {
+  const today = dayStart();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const deliveredToday = state.orders.filter((order) => order.status === "delivered"
+    && new Date(order.delivered_at) >= today
+    && new Date(order.delivered_at) < tomorrow);
+  const createdToday = state.orders.filter((order) => new Date(order.created_at) >= today && new Date(order.created_at) < tomorrow);
+  const avgAcceptance = averageDurationSeconds(createdToday, "created_at", "assigned_at");
+  const avgDelivery = averageDurationSeconds(deliveredToday, "at_store_at", "delivered_at");
+  const ordersByCourier = new Map();
+
+  const courierMetrics = (name) => ({ name, orders: [], acceptanceOrders: [] });
+
+  for (const order of deliveredToday) {
+    if (!order.courier_id) continue;
+    const existing = ordersByCourier.get(order.courier_id) || courierMetrics(order.courier?.full_name || order.courier_name || "Motorizado");
+    existing.orders.push(order);
+    ordersByCourier.set(order.courier_id, existing);
+  }
+
+  for (const order of createdToday.filter((item) => item.assigned_at && item.courier_id)) {
+    const existing = ordersByCourier.get(order.courier_id) || courierMetrics(order.courier?.full_name || order.courier_name || "Motorizado");
+    existing.acceptanceOrders.push(order);
+    ordersByCourier.set(order.courier_id, existing);
+  }
+
+  for (const profile of state.profiles.filter((item) => item.role === "motorizado")) {
+    if (!ordersByCourier.has(profile.id)) {
+      ordersByCourier.set(profile.id, courierMetrics(profile.full_name));
+    }
+  }
+
+  const ranking = [...ordersByCourier.values()].sort((left, right) =>
+    right.orders.length - left.orders.length || left.name.localeCompare(right.name, "es")
+  );
+  const topCourier = ranking[0]?.orders.length ? ranking[0].name : "—";
+  const rankingRows = ranking.map(({ name, orders, acceptanceOrders }) => {
+    const acceptance = averageDurationSeconds(acceptanceOrders, "created_at", "assigned_at");
+    const delivery = averageDurationSeconds(orders, "at_store_at", "delivered_at");
+    return `<tr><td>${escapeHtml(name)}</td><td>${orders.length}</td><td>${formatDuration(acceptance)}</td><td>${formatDuration(delivery)}</td></tr>`;
+  }).join("");
+
+  return `<div class="grid metrics">
+    <article class="card"><span class="metric-label">Pedidos entregados hoy</span><div class="metric-value">${deliveredToday.length}</div></article>
+    <article class="card"><span class="metric-label">Motorizado con más entregas</span><div class="metric-value metric-text">${escapeHtml(topCourier)}</div><span class="metric-foot">${ranking[0]?.orders.length || 0} pedidos completados hoy</span></article>
+    <article class="card"><span class="metric-label">Promedio de aceptación</span><div class="metric-value">${formatDuration(avgAcceptance)}</div><span class="metric-foot">Desde creación hasta asignación, pedidos creados hoy</span></article>
+    <article class="card"><span class="metric-label">Promedio de entrega</span><div class="metric-value">${formatDuration(avgDelivery)}</div><span class="metric-foot">Desde llegada al comercio hasta entrega, finalizados hoy</span></article>
+  </div>
+  <div class="section-head"><h2>Desempeño de motorizados · hoy</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>Motorizado</th><th>Pedidos entregados</th><th>Promedio de aceptación</th><th>Promedio de entrega</th></tr></thead><tbody>${rankingRows || `<tr><td colspan="4">No hay motorizados registrados.</td></tr>`}</tbody></table></div>`;
+}
+
 function reportTable(orders) {
   return `<table><thead><tr><th>Aliado</th><th>Cliente</th><th>Dirección</th><th>Motorizado</th><th>Creado por</th><th>Hora comercio</th><th>Hora entrega</th><th>Fecha</th><th>Delivery</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escapeHtml(order.allies?.name)}</td><td>${escapeHtml(order.client_name)}</td><td>${escapeHtml(order.address)}</td><td>${escapeHtml(order.courier?.full_name || order.courier_name || "")}</td><td>${escapeHtml(order.creator?.full_name || order.creator_name || "—")}</td><td>${dateTime(order.at_store_at)}</td><td>${dateTime(order.delivered_at)}</td><td>${new Date(order.delivered_at).toLocaleDateString("es-CO")}</td><td>${formatMoney(order.delivery_fee)}</td></tr>`).join("") : `<tr><td colspan="9">Sin pedidos para el periodo seleccionado.</td></tr>`}</tbody></table>`;
 }
@@ -853,7 +1150,12 @@ async function toggleOnline(event) {
     return reportError(error);
   }
   state.profile.online = online;
-  showToast(online ? "Estás activo y puedes recibir pedidos." : "Quedaste desconectado.");
+  if (online) startCourierLocationTracking();
+  else {
+    stopCourierLocationTracking();
+    state.courierLocations = state.courierLocations.filter((location) => location.courier_id !== state.profile.id);
+  }
+  showToast(online ? "Estás activo. Se solicitará permiso de ubicación para aparecer en Monitoreo." : "Quedaste desconectado; tu ubicación fue retirada del monitoreo.");
   await refreshData(true);
   renderApp();
 }
@@ -960,6 +1262,12 @@ function exportReport() {
 }
 
 async function signOut() {
+  if (state.profile?.role === "motorizado" && state.profile.online) {
+    stopCourierLocationTracking();
+    const { error: availabilityError } = await supabase.rpc("set_courier_online", { is_online: false });
+    if (availabilityError) console.error("No se pudo cerrar la disponibilidad antes de salir:", availabilityError);
+  }
+  stopCourierLocationTracking();
   if (state.realtime) {
     await supabase.removeChannel(state.realtime);
     state.realtime = null;

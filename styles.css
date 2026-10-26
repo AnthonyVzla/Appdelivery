@@ -82,10 +82,16 @@ textarea { min-height: 82px; resize: vertical; }
 .card { min-width: 0; padding: 19px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, #201e25, #19171d); }
 .metric-label { font-size: 12px; color: var(--muted); }
 .metric-value { font-family: "Space Grotesk", sans-serif; font-size: 30px; font-weight: 700; margin: 12px 0 2px; }
+.metric-value.metric-text { font-size: 19px; overflow-wrap: anywhere; }
 .metric-foot { font-size: 11px; color: #bd87d7; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 15px; }
 .toolbar label { min-width: 155px; }
 .list { display: grid; gap: 12px; }
+.monitoring-map { width: 100%; min-height: 360px; margin: 14px 0 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #232129; }
+.monitoring-courier { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.monitoring-courier h3 { margin-bottom: 5px; }
+.monitoring-courier p { margin-bottom: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.monitoring-courier .courier-work { color: #e8e5eb; margin-top: 8px; }
 .order-card { padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .order-card.late { border-color: #bd3d4e; background: linear-gradient(145deg, #381a22, #21171c); }
 .deadline { display: inline-flex; margin-top: 12px; padding: 6px 9px; border-radius: 8px; color: #ffd18c; background: #df9b351e; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -152,4 +158,6 @@ tr:last-child td { border-bottom: 0; }
   .form-grid .wide { grid-column: auto; }
   .section-head { align-items: flex-start; }
   .audio-activation { align-items: stretch; flex-direction: column; }
+  .monitoring-map { min-height: 300px; }
+  .monitoring-courier { align-items: flex-start; }
 }

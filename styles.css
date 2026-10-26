@@ -88,6 +88,8 @@ textarea { min-height: 82px; resize: vertical; }
 .toolbar label { min-width: 155px; }
 .list { display: grid; gap: 12px; }
 .monitoring-map { width: 100%; min-height: 360px; margin: 14px 0 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #232129; }
+.leaflet-tooltip.courier-map-label { padding: 4px 8px; border: 1px solid #8d54ef; border-radius: 7px; color: #fff; background: #17141deF; box-shadow: 0 2px 8px #0009; font: 700 12px/1.25 "DM Sans", sans-serif; white-space: nowrap; }
+.leaflet-tooltip-top.courier-map-label::before { border-top-color: #8d54ef; }
 .monitoring-courier { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 .monitoring-courier h3 { margin-bottom: 5px; }
 .monitoring-courier p { margin-bottom: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }

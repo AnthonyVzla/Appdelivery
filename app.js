@@ -706,6 +706,13 @@ function refreshMonitoringMap() {
       fillOpacity: 0.9,
       weight: 2
     });
+    marker.bindTooltip(name, {
+      permanent: true,
+      direction: "top",
+      offset: [0, -8],
+      className: "courier-map-label",
+      opacity: 1
+    });
     marker.bindPopup(`<strong>${name}</strong><br>${busy ? "Ocupado" : "Disponible"}<br>Actualizado: ${dateTime(location.updated_at)}`);
     marker.addTo(state.monitoringMarkers);
     bounds.push([location.latitude, location.longitude]);

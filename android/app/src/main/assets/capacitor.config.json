@@ -1,9 +1,12 @@
 {
-  "appId": "delivery.aunpaso.app",
-  "appName": "A un paso delivery",
-  "webDir": "www",
-  "android": {
-    "allowMixedContent": false,
-    "backgroundColor": "#111014"
-  }
+	"__esModule": true,
+	"default": {
+		"appId": "delivery.aunpaso.app",
+		"appName": "A Un Paso",
+		"webDir": "www",
+		"android": {
+			"allowMixedContent": false,
+			"backgroundColor": "#111014"
+		}
+	}
 }

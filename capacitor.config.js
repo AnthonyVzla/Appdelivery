@@ -1,7 +1,7 @@
 ﻿/** @type {import('@capacitor/cli').CapacitorConfig} */
 const config = {
   appId: 'delivery.aunpaso.app',
-  appName: 'A un paso delivery',
+  appName: 'A Un Paso',
   webDir: 'www',
   android: {
     allowMixedContent: false,

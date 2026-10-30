@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -437,7 +437,7 @@ function renderPending() {
 async function refreshData(quiet) {
   if (!state.profile || !state.session) return;
   const { data: orders, error: orderError } = await supabase.from("orders")
-    .select("*, allies(name, location_url), courier:profiles!orders_courier_id_fkey(full_name, username, phone), creator:profiles!orders_created_by_fkey(full_name)")
+    .select("*, allies(name, location_url), courier:profiles!orders_courier_id_fkey(full_name, username, phone, earnings_percentage), creator:profiles!orders_created_by_fkey(full_name)")
     .order("created_at", { ascending: false }).limit(500);
   if (orderError) {
     if (!quiet) reportError(orderError);
@@ -445,6 +445,7 @@ async function refreshData(quiet) {
   }
   const previousOrders = new Map(state.orders.map((order) => [order.id, order]));
   state.orders = orders || [];
+  reconcileCourierAlarms();
   if (quiet && state.profile.role === "motorizado") {
     for (const order of state.orders) {
       const previous = previousOrders.get(order.id);
@@ -458,7 +459,7 @@ async function refreshData(quiet) {
   if (["administracion", "soporte", "aliado"].includes(state.profile.role)) {
     const [allyResult, profileResult] = await Promise.all([
       supabase.from("allies").select("*").order("name"),
-      supabase.from("profiles").select("id, username, full_name, phone, role, ally_id, approved, suspended, online, last_seen_at, updated_at").order("full_name")
+      supabase.from("profiles")      .select("id, username, full_name, phone, role, ally_id, earnings_percentage, approved, suspended, online, last_seen_at, updated_at").order("full_name")
     ]);
     if (allyResult.error || profileResult.error) {
       if (!quiet) reportError(allyResult.error || profileResult.error);
@@ -579,8 +580,9 @@ async function toggleCourierAlerts() {
 
   try {
     await prepareAlertAudio("incoming");
+    await enableNativeNotifications();
     state.alertsEnabled = true;
-    showToast("Sonido de pedidos probado y alertas activadas para esta sesión.");
+    showToast("Sonido y notificaciones de pedidos activados.");
     renderApp();
   } catch (error) {
     reportError(new Error(`No se pudieron activar las alertas: ${error.message}`));
@@ -626,14 +628,99 @@ async function playCourierAlert(kind) {
   }
 }
 
+async function enableNativeNotifications() {
+  const isNative = window.Capacitor?.isNativePlatform?.();
+  if (!isNative) {
+    if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission();
+    return;
+  }
+  const plugin = window.Capacitor?.Plugins?.LocalNotifications;
+  if (!plugin) return;
+  await plugin.requestPermissions();
+  await plugin.createChannel({
+    id: "courier_orders",
+    name: "Pedidos disponibles y asignados",
+    description: "Alertas repetidas de pedidos pendientes",
+    importance: 5,
+    visibility: 1,
+    vibration: true,
+    sound: "default"
+  });
+}
+
+function nativeNotificationPlugin() {
+  if (!window.Capacitor?.isNativePlatform?.()) return null;
+  return window.Capacitor?.Plugins?.LocalNotifications || null;
+}
+
+function notificationId(orderId) {
+  let hash = 0;
+  for (const char of String(orderId)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return 100000 + (hash % 800000000);
+}
+
+async function showNativeCourierAlarm(kind, order) {
+  const allyName = order.allies?.name || "Aliado";
+  const plugin = nativeNotificationPlugin();
+  if (!plugin) return;
+  await plugin.schedule({ notifications: [{
+    id: notificationId(order.id),
+    title: kind === "assigned" ? "Pedido asignado" : "Pedido disponible",
+    body: kind === "assigned" ? `Tienes un pedido asignado de ${allyName}.` : `Nuevo pedido disponible de ${allyName}.`,
+    schedule: { every: "minute", count: 120 },
+    channelId: "courier_orders",
+    smallIcon: "ic_launcher"
+  }] });
+}
+
+async function stopNativeCourierAlarm(orderId) {
+  const plugin = nativeNotificationPlugin();
+  if (!plugin) return;
+  await plugin.cancel({ notifications: [{ id: notificationId(orderId) }] });
+}
+
+function reconcileCourierAlarms() {
+  if (state.profile?.role !== "motorizado") return;
+  for (const orderId of [...state.courierAlarms.keys()]) {
+    const order = state.orders.find((item) => item.id === orderId);
+    const keepForThisCourier = order && (
+      (order.status === "pending" && order.released && state.profile.online)
+      || (order.courier_id === state.profile.id && order.status !== "delivered")
+    );
+    if (!keepForThisCourier) stopCourierAlarm(orderId);
+  }
+}
+
+function stopCourierAlarm(orderId) {
+  const alarm = state.courierAlarms.get(orderId);
+  if (alarm) {
+    clearInterval(alarm);
+    state.courierAlarms.delete(orderId);
+  }
+  void stopNativeCourierAlarm(orderId);
+}
+
+async function startCourierAlarm(kind, order) {
+  stopCourierAlarm(order.id);
+  await showNativeCourierAlarm(kind, order);
+  if (!state.alertsEnabled) return;
+  await playCourierAlert(kind);
+  if (state.courierAlarms.has(order.id)) return;
+  const alarm = setInterval(() => {
+    if (!state.alertsEnabled) return stopCourierAlarm(order.id);
+    void playCourierAlert(kind);
+    if (typeof navigator.vibrate === "function") navigator.vibrate([500, 300, 500]);
+  }, 8000);
+  state.courierAlarms.set(order.id, alarm);
+}
+
 async function notifyCourier(kind, order) {
   const allyName = order.allies?.name || "Aliado";
   const message = kind === "assigned"
     ? `Tienes un pedido asignado de ${allyName}.`
     : `Nuevo pedido disponible de ${allyName}.`;
   showToast(message);
-  if (!state.alertsEnabled) return;
-  await playCourierAlert(kind);
+  await startCourierAlarm(kind, order);
 }
 
 function emitCourierNotification(kind, order) {
@@ -852,7 +939,7 @@ function renderDashboard() {
   const activeOrders = state.orders.filter((order) => order.status !== "delivered");
   return `<div class="grid metrics">
     <article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${completed.length} entregas finalizadas</span></article>
-    <article class="card"><span class="metric-label">${role === "motorizado" ? "Tu ganancia hoy (70%)" : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
+    <article class="card"><span class="metric-label">${role === "motorizado" ? "Tu ganancia hoy (${courierEarningsPercentage()}%)" : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
     <article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${role === "motorizado" ? (state.profile.online ? "1" : "0") : countOnline()}</div><span class="metric-foot">Disponibles en este momento</span></article>
   </div>
   <div class="section-head"><h2>${role === "motorizado" ? "Tus entregas activas" : "Pedidos en curso"}</h2></div>
@@ -873,7 +960,14 @@ function whatsappUrl(phone, allyName) {
 }
 
 function courierEarnings(order) {
-  return Number(order.delivery_fee || 0) * 0.7;
+  const configuredPercentage = Number(order.courier?.earnings_percentage ?? state.profile?.earnings_percentage ?? 70);
+  const percentage = Number.isFinite(configuredPercentage) ? Math.min(100, Math.max(0, configuredPercentage)) : 70;
+  return Number(order.delivery_fee || 0) * percentage / 100;
+}
+
+function courierEarningsPercentage() {
+  const configuredPercentage = Number(state.profile?.earnings_percentage ?? 70);
+  return Number.isFinite(configuredPercentage) ? Math.min(100, Math.max(0, configuredPercentage)) : 70;
 }
 
 function orderDeadline(order) {
@@ -974,14 +1068,14 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${state.profiles.filter((profile) => profile.role === "motorizado" && profile.approved && !profile.suspended).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     const isCourier = state.profile.role === "motorizado";
-    const priceLabel = isCourier ? `<strong>Tu ganancia (70%):</strong> ${formatMoney(courierEarnings(order))}` : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}`;
+    const priceLabel = isCourier ? `<strong>Tu ganancia (${courierEarningsPercentage()}%):</strong> ${formatMoney(courierEarnings(order))}` : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}`;
     const orderStatus = order.status === "pending" && order.released === false && ["soporte", "administracion"].includes(state.profile.role)
       ? `<span class="badge orange">Pendiente de soporte</span>`
       : statusBadge(order.status);
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
       ${renderDeadline(order)}
       ${context === "current" && order.allies?.location_url ? `<div class="merchant-location"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button></div>` : ""}
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br>${priceLabel}</p>
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br>${priceLabel}</p>
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
@@ -1018,7 +1112,7 @@ function filteredDelivered() {
 function deliveredSummary() {
   const orders = filteredDelivered();
   const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (70%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function filteredToday() {
@@ -1046,8 +1140,9 @@ function renderCreateOrder() {
     <label>Nombre del cliente<input name="clientName" required></label>
     <label>Teléfono del cliente<input name="clientPhone" type="tel" required></label>
     <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="any" inputmode="decimal" required></label>
-    <label class="wide">Dirección escrita<textarea name="address" required></textarea></label>
-    <label class="wide">Ubicación de Google Maps (URL)<input name="mapsUrl" type="url" placeholder="https://maps.google.com/..." required></label>
+    <label class="wide">Descripción del pedido<textarea name="description" placeholder="Ej.: Torta, traslado, encomienda..." required></textarea></label>
+    <label class="wide">Dirección escrita<textarea name="address"></textarea></label>
+    <label class="wide">Ubicación de Google Maps (URL)<input name="mapsUrl" type="url" placeholder="https://maps.google.com/..."></label>
     <div class="wide"><button class="button primary" type="submit">Crear pedido</button></div>
   </form></article>`;
 }
@@ -1059,7 +1154,20 @@ function renderAllies() {
 }
 
 function renderUsers() {
-  return `<div class="section-head"><h2>Usuarios y permisos</h2></div><div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Nombre y teléfono</th><th>Rol</th><th>Aliado asignado</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.profiles.map((profile) => `<tr><td>@${escapeHtml(profile.username)}</td><td><input aria-label="Nombre completo" data-profile-name="${profile.id}" value="${escapeHtml(profile.full_name)}"><input aria-label="Teléfono" data-profile-phone="${profile.id}" value="${escapeHtml(profile.phone || "")}" style="margin-top:6px"></td><td><select data-action="role" data-id="${profile.id}"><option value="">Sin rol</option>${Object.entries(roleNames).map(([value, label]) => `<option value="${value}" ${profile.role === value ? "selected" : ""}>${label}</option>`).join("")}</select></td><td><select aria-label="Aliado del usuario" data-profile-ally="${profile.id}"><option value="">Sin aliado</option>${state.allies.map((ally) => `<option value="${ally.id}" ${profile.ally_id === ally.id ? "selected" : ""}>${escapeHtml(ally.name)}</option>`).join("")}</select></td><td>${profile.suspended ? `<span class="badge">Suspendido</span>` : profile.approved ? `<span class="badge green">${profile.online ? "Activo" : "Aprobado"}</span>` : `<span class="badge orange">Pendiente</span>`}</td><td class="user-actions"><button class="button subtle small" data-action="save-profile" data-id="${profile.id}">Guardar</button><button class="button ${profile.suspended ? "success" : "danger"} small" data-action="suspend" data-id="${profile.id}" data-suspended="${profile.suspended}">${profile.suspended ? "Reactivar" : "Suspender"}</button><button class="button danger small" data-action="delete-user" data-id="${profile.id}">Eliminar</button></td></tr>`).join("")}</tbody></table></div><p class="fine-print">Para cuentas con rol Aliado, asigna también el aliado comercial correspondiente. Eliminar acceso conserva el historial.</p>`;
+  const query = state.usersSearch.trim().toLowerCase();
+  const visibleProfiles = state.profiles.filter((profile) => {
+    const matchesRole = state.usersRole === "all" || profile.role === state.usersRole;
+    const matchesSearch = !query || `${profile.username} ${profile.full_name} ${profile.phone || ""}`.toLowerCase().includes(query);
+    return matchesRole && matchesSearch;
+  });
+  const roleTabs = [
+    ["all", "Todos"], ["motorizado", "Motorizados"], ["aliado", "Aliados"],
+    ["soporte", "Soporte"], ["administracion", "Administración"]
+  ];
+  const rows = visibleProfiles.map((profile) => `<tr><td>@${escapeHtml(profile.username)}</td><td><input aria-label="Nombre completo" data-profile-name="${profile.id}" value="${escapeHtml(profile.full_name)}"><input aria-label="Teléfono" data-profile-phone="${profile.id}" value="${escapeHtml(profile.phone || "")}" style="margin-top:6px"></td><td><select data-action="role" data-id="${profile.id}"><option value="">Sin rol</option>${Object.entries(roleNames).map(([value, label]) => `<option value="${value}" ${profile.role === value ? "selected" : ""}>${label}</option>`).join("")}</select>${profile.role === "motorizado" ? `<label class="muted">Porcentaje de ganancia <input type="number" min="0" max="100" step="1" data-profile-percentage="${profile.id}" value="${Number(profile.earnings_percentage ?? 70)}">%</label>` : ""}</td><td><select aria-label="Aliado del usuario" data-profile-ally="${profile.id}"><option value="">Sin aliado</option>${state.allies.map((ally) => `<option value="${ally.id}" ${profile.ally_id === ally.id ? "selected" : ""}>${escapeHtml(ally.name)}</option>`).join("")}</select></td><td>${profile.suspended ? `<span class="badge">Suspendido</span>` : profile.approved ? `<span class="badge green">${profile.online ? "Activo" : "Aprobado"}</span>` : `<span class="badge orange">Pendiente</span>`}</td><td class="user-actions"><button class="button subtle small" data-action="save-profile" data-id="${profile.id}">Guardar</button><button class="button ${profile.suspended ? "success" : "danger"} small" data-action="suspend" data-id="${profile.id}" data-suspended="${profile.suspended}">${profile.suspended ? "Reactivar" : "Suspender"}</button><button class="button danger small" data-action="delete-user" data-id="${profile.id}">Eliminar</button></td></tr>`).join("");
+  return `<div class="section-head"><h2>Usuarios y permisos</h2><span class="badge">${visibleProfiles.length} usuarios</span></div>
+    <div class="toolbar users-toolbar"><label class="wide">Buscar usuario<input id="users-search" type="search" placeholder="Nombre, usuario o teléfono" value="${escapeHtml(state.usersSearch)}"></label><div class="wide" style="display:flex;gap:8px;flex-wrap:wrap">${roleTabs.map(([role, label]) => `<button type="button" class="button ${state.usersRole === role ? "primary" : "subtle"} small" data-user-role="${role}">${label}</button>`).join("")}</div></div>
+    <div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Nombre y teléfono</th><th>Rol / porcentaje</th><th>Aliado asignado</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="muted">No hay usuarios que coincidan.</td></tr>`}</tbody></table></div><p class="fine-print">El porcentaje de ganancia se aplica sobre el costo de cada delivery. Las amonestaciones se pueden reflejar reduciendo este porcentaje.</p>`;
 }
 
 function renderReports() {
@@ -1210,10 +1318,20 @@ function bindScreenActions() {
 
 function deliveredSummaryFor(orders) {
   const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (70%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function bindOrderActions() {
+  const usersSearch = document.querySelector("#users-search");
+  if (usersSearch) usersSearch.addEventListener("input", () => {
+    state.usersSearch = usersSearch.value;
+    renderApp();
+    document.querySelector("#users-search")?.focus();
+  });
+  document.querySelectorAll("[data-user-role]").forEach((button) => button.addEventListener("click", () => {
+    state.usersRole = button.dataset.userRole;
+    renderApp();
+  }));
   document.querySelectorAll('[data-action="claim"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "claim_order")));
   document.querySelectorAll('[data-action="advance"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "advance_order", { next_status: button.dataset.status })));
   document.querySelectorAll('[data-action="assign"]').forEach((select) => select.addEventListener("change", () => {
@@ -1244,7 +1362,12 @@ function bindOrderActions() {
     const role = document.querySelector(`[data-action="role"][data-id="${id}"]`).value || null;
     const allyId = document.querySelector(`[data-profile-ally="${id}"]`).value || null;
     if (role === "aliado" && !allyId) return showToast("Asigna un aliado comercial a este usuario.", true);
-    updateProfile(id, { full_name, phone, role, approved: Boolean(role), ally_id: role === "aliado" ? allyId : null });
+    const percentageInput = document.querySelector(`[data-profile-percentage="${id}"]`);
+    const earningsPercentage = percentageInput ? Number(percentageInput.value) : undefined;
+    if (earningsPercentage !== undefined && (!Number.isFinite(earningsPercentage) || earningsPercentage < 0 || earningsPercentage > 100)) return showToast("El porcentaje debe estar entre 0 y 100.", true);
+    const changes = { full_name, phone, role, approved: Boolean(role), ally_id: role === "aliado" ? allyId : null };
+    if (role === "motorizado" && earningsPercentage !== undefined) changes.earnings_percentage = earningsPercentage;
+    updateProfile(id, changes);
   }));
   document.querySelectorAll('[data-action="suspend"]').forEach((button) => button.addEventListener("click", () => updateProfile(button.dataset.id, { suspended: button.dataset.suspended !== "true", online: false })));
   document.querySelectorAll('[data-action="delete-user"]').forEach((button) => button.addEventListener("click", () => deleteUser(button.dataset.id)));
@@ -1279,11 +1402,12 @@ async function createOrder(event) {
   const assignedCourier = !isAlly && Boolean(document.querySelector("#assign-courier-toggle")?.checked);
   const allyId = isAlly ? state.profile.ally_id : data.get("allyId");
   if (!allyId) return showToast("Esta cuenta no tiene un aliado asignado. Contacta a administración.", true);
-  if (!/^https?:\/\/\S+$/i.test(mapsUrl)) return showToast("La ubicación debe ser una URL http o https.", true);
+  if (mapsUrl && !/^https?:\/\/\S+$/i.test(mapsUrl)) return showToast("La ubicación debe ser una URL http o https.", true);
   const { data: orderId, error } = await supabase.rpc("create_order", {
     p_ally_id: allyId,
     p_client_name: String(data.get("clientName")).trim(),
     p_client_phone: String(data.get("clientPhone")).trim(),
+    p_description: String(data.get("description")).trim(),
     p_address: String(data.get("address")).trim(),
     p_maps_url: mapsUrl,
     p_delivery_fee: Number(data.get("deliveryFee")),
@@ -1347,6 +1471,7 @@ async function updateOrder(id, action, args = {}) {
     return reportError(error);
   }
   showToast(action === "claim_order" ? "Pedido asignado a tu cuenta." : action === "assign_order" ? "Pedido asignado al motorizado." : action === "release_order" ? "Pedido liberado para motorizados activos." : "Estado del pedido actualizado.");
+  if (action === "claim_order") stopCourierAlarm(id);
   await refreshData(true);
   renderApp();
 }
@@ -1364,6 +1489,7 @@ function exportReport() {
   const columns = [
     ["Aliado", (order) => order.allies?.name || ""],
     ["Cliente", (order) => order.client_name],
+    ["Descripción", (order) => order.description || ""],
     ["Direccion", (order) => order.address],
     ["Motorizado", (order) => order.courier?.full_name || ""],
     ["Creado por", (order) => order.creator?.full_name || order.creator_name || ""],

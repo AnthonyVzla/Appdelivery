@@ -663,14 +663,22 @@ async function showNativeCourierAlarm(kind, order) {
   const allyName = order.allies?.name || "Aliado";
   const plugin = nativeNotificationPlugin();
   if (!plugin) return;
-  await plugin.schedule({ notifications: [{
+  const notification = {
     id: notificationId(order.id),
     title: kind === "assigned" ? "Pedido asignado" : "Pedido disponible",
     body: kind === "assigned" ? `Tienes un pedido asignado de ${allyName}.` : `Nuevo pedido disponible de ${allyName}.`,
-    schedule: { every: "minute", count: 120 },
     channelId: "courier_orders",
     smallIcon: "ic_launcher"
-  }] });
+  };
+  if (kind === "assigned") {
+    const now = Date.now();
+    await plugin.schedule({ notifications: [
+      { ...notification, schedule: { at: new Date(now + 500) } },
+      { ...notification, id: notificationId(order.id) + 1, schedule: { at: new Date(now + 3500) } }
+    ] });
+  } else {
+    await plugin.schedule({ notifications: [{ ...notification, schedule: { every: "minute", count: 120 } }] });
+  }
 }
 
 async function stopNativeCourierAlarm(orderId) {
@@ -682,7 +690,7 @@ async function stopNativeCourierAlarm(orderId) {
   if (typeof navigator.vibrate === "function") navigator.vibrate(0);
   const plugin = nativeNotificationPlugin();
   if (!plugin) return;
-  await plugin.cancel({ notifications: [{ id: notificationId(orderId) }] });
+  await plugin.cancel({ notifications: [{ id: notificationId(orderId) }, { id: notificationId(orderId) + 1 }] });
 }
 
 function reconcileCourierAlarms() {
@@ -694,7 +702,10 @@ function reconcileCourierAlarms() {
       && order.released
       && !order.courier_id
       && state.profile.online;
-    if (!keepAvailableAlarm) stopCourierAlarm(orderId);
+    const keepAssignedAlarm = order
+      && order.courier_id === state.profile.id
+      && !["delivered", "cancelled"].includes(order.status);
+    if (!keepAvailableAlarm && !keepAssignedAlarm) stopCourierAlarm(orderId);
   }
 }
 
@@ -702,6 +713,7 @@ function stopCourierAlarm(orderId) {
   const alarm = state.courierAlarms.get(orderId);
   if (alarm) {
     clearInterval(alarm);
+    clearTimeout(alarm);
     state.courierAlarms.delete(orderId);
   }
   void stopNativeCourierAlarm(orderId);
@@ -712,6 +724,14 @@ async function startCourierAlarm(kind, order) {
   await showNativeCourierAlarm(kind, order);
   if (!state.alertsEnabled) return;
   await playCourierAlert(kind);
+  if (kind === "assigned") {
+    const secondSound = setTimeout(async () => {
+      await playCourierAlert(kind);
+      if (typeof navigator.vibrate === "function") navigator.vibrate([350, 120, 350]);
+    }, 3000);
+    state.courierAlarms.set(order.id, secondSound);
+    return;
+  }
   if (state.courierAlarms.has(order.id)) return;
   const alarm = setInterval(() => {
     if (!state.alertsEnabled) return stopCourierAlarm(order.id);
@@ -1075,7 +1095,7 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<button class="button primary small" data-action="reassign" data-id="${order.id}">Reasignar pedido</button>`);
       buttons.push(`<button class="button subtle small" data-action="release" data-id="${order.id}">Liberar para que otro lo tome</button>`);
     } else if (["staff", "pending"].includes(context) && ["administracion", "soporte"].includes(state.profile.role) && order.status === "pending") {
-      buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${state.profiles.filter((profile) => profile.role === "motorizado" && profile.approved && !profile.suspended).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
+      buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${activeCouriers().map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     const isCourier = state.profile.role === "motorizado";
     const priceLabel = isCourier ? `<strong>Tu ganancia (${courierEarningsPercentage()}%):</strong> ${formatMoney(courierEarnings(order))}` : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}`;

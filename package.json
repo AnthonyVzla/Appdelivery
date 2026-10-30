@@ -1,0 +1,23 @@
+{
+  "name": "aunpaso",
+  "version": "1.0.0",
+  "description": "PWA de gestión de pedidos para motorizados, aliados, soporte y administración. La aplicación es estática y se publica en GitHub Pages; Supabase proporciona autenticación, base de datos, RLS y actualizaciones en tiempo real.",
+  "main": "app.js",
+  "scripts": {
+    "android:add": "cap add android",
+    "android:sync": "cap sync android",
+    "android:open": "cap open android",
+    "android:build-debug": "cd android && gradlew.bat assembleDebug",
+    "android:build-release": "cd android && gradlew.bat assembleRelease"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@capacitor-community/background-geolocation": "^1.3.1",
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10"
+  }
+}

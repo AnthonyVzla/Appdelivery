@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -231,7 +231,16 @@ async function requestCourierWakeLock() {
   }
 }
 
+function nativeBackgroundLocation() {
+  return window.Capacitor?.Plugins?.BackgroundGeolocation || null;
+}
+
 function stopCourierLocationTracking() {
+  const nativeLocation = nativeBackgroundLocation();
+  if (state.nativeBackgroundLocationWatcherId !== null && nativeLocation) {
+    nativeLocation.removeWatcher({ id: state.nativeBackgroundLocationWatcherId }).catch(() => {});
+  }
+  state.nativeBackgroundLocationWatcherId = null;
   if (state.courierLocationWatchId !== null && "geolocation" in navigator) {
     navigator.geolocation.clearWatch(state.courierLocationWatchId);
   }
@@ -287,7 +296,42 @@ function resumeCourierLocationTracking() {
   }
 }
 
+async function startNativeBackgroundLocationTracking() {
+  const nativeLocation = nativeBackgroundLocation();
+  if (!nativeLocation || state.nativeBackgroundLocationWatcherId !== null) return false;
+  state.courierLocationError = "";
+  try {
+    state.nativeBackgroundLocationWatcherId = await nativeLocation.addWatcher({
+      backgroundMessage: "Ubicación activa para entregas. Cambia a OFF para detenerla.",
+      backgroundTitle: "A un paso · GPS activo",
+      requestPermissions: true,
+      stale: false,
+      distanceFilter: 10
+    }, (location, error) => {
+      if (error) {
+        console.error("GPS nativo:", error);
+        if (error.code === "NOT_AUTHORIZED") {
+          state.courierLocationError = "Concede ubicación permanente y ubicación en segundo plano para compartir tu posición.";
+          showToast(state.courierLocationError, true);
+        }
+        return;
+      }
+      const position = { coords: { latitude: location.latitude, longitude: location.longitude, accuracy: location.accuracy } };
+      state.latestCourierPosition = position;
+      sendCourierLocation(position);
+    });
+    return true;
+  } catch (error) {
+    console.error("No se pudo iniciar el GPS nativo:", error);
+    return false;
+  }
+}
+
 function startCourierLocationTracking() {
+  if (nativeBackgroundLocation()) {
+    startNativeBackgroundLocationTracking();
+    return;
+  }
   if (state.profile?.role !== "motorizado" || !state.profile.online || !("geolocation" in navigator)) {
     if (state.profile?.role === "motorizado" && state.profile.online && !("geolocation" in navigator)) {
       state.courierLocationError = "Este navegador no permite compartir la ubicación.";

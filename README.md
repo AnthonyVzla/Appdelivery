@@ -1,5 +1,19 @@
 # A un paso delivery
 
+## APK Android con GPS en segundo plano
+
+El proyecto incluye Capacitor y `@capacitor-community/background-geolocation`. La APK carga la PWA publicada en GitHub Pages y activa un servicio Android de ubicación mientras el motorizado está en ON. Al cambiar a OFF o cerrar sesión, el watcher nativo se elimina.
+
+Android muestra una notificación persistente mientras comparte la ubicación. Es necesario conceder ubicación precisa, ubicación mientras la app está en segundo plano y desactivar optimización de batería para esta aplicación si el fabricante lo solicita. La compilación automática está en `.github/workflows/android-apk.yml`; ejecuta **Build Android APK** desde GitHub Actions y descarga el artefacto `aunpaso-debug-apk` cuando termine.
+
+Comandos locales opcionales:
+
+```powershell
+npm install
+npx cap sync android
+npx cap open android
+```
+
 PWA de gestión de pedidos para motorizados, aliados, soporte y administración. La aplicación es estática y se publica en GitHub Pages; Supabase proporciona autenticación, base de datos, RLS y actualizaciones en tiempo real.
 
 ## Configuración de Supabase

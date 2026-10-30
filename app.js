@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -93,8 +93,13 @@ function setupServiceWorkerUpdates() {
   }).catch((error) => console.error("No se pudo registrar o comprobar el service worker:", error));
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) checkServiceWorkerUpdate();
+    if (!document.hidden) {
+      checkServiceWorkerUpdate();
+      resumeCourierLocationTracking();
+    }
   });
+  window.addEventListener("pageshow", resumeCourierLocationTracking);
+  window.addEventListener("focus", resumeCourierLocationTracking);
   state.updateCheckTimer = setInterval(checkServiceWorkerUpdate, 30 * 60 * 1000);
 }
 
@@ -202,13 +207,74 @@ function startRealtime() {
   });
 }
 
+async function requestCourierWakeLock() {
+  if (!("wakeLock" in navigator) || document.hidden) return;
+  try {
+    if (!state.courierWakeLock || state.courierWakeLock.released) {
+      state.courierWakeLock = await navigator.wakeLock.request("screen");
+      state.courierWakeLock.addEventListener("release", () => {
+        state.courierWakeLock = null;
+      }, { once: true });
+    }
+  } catch (error) {
+    console.warn("No se pudo mantener activa la pantalla para el GPS:", error);
+  }
+}
+
 function stopCourierLocationTracking() {
   if (state.courierLocationWatchId !== null && "geolocation" in navigator) {
     navigator.geolocation.clearWatch(state.courierLocationWatchId);
   }
+  if (state.locationRefreshTimer) clearInterval(state.locationRefreshTimer);
+  if (state.courierWakeLock) {
+    state.courierWakeLock.release().catch(() => {});
+    state.courierWakeLock = null;
+  }
   state.courierLocationWatchId = null;
+  state.locationRefreshTimer = null;
   state.courierLocationWritePending = false;
   state.lastCourierLocationSentAt = 0;
+  state.latestCourierPosition = null;
+}
+
+async function sendCourierLocation(position, force = false) {
+  if (!state.profile?.online || (!force && (state.courierLocationWritePending || Date.now() - state.lastCourierLocationSentAt < 15000))) return;
+  state.courierLocationWritePending = true;
+  try {
+    await supabase.rpc("heartbeat_courier");
+    const { error } = await supabase.rpc("update_courier_location", {
+      p_latitude: position.coords.latitude,
+      p_longitude: position.coords.longitude,
+      p_accuracy: position.coords.accuracy
+    });
+    if (error) throw error;
+    state.lastCourierLocationSentAt = Date.now();
+    state.courierLocationError = "";
+  } catch (error) {
+    console.error("No se pudo guardar la ubicación del motorizado:", error);
+    state.courierLocationError = "No se pudo actualizar tu ubicación. Verifica tu conexión y los permisos del GPS.";
+    showToast(state.courierLocationError, true);
+  } finally {
+    state.courierLocationWritePending = false;
+  }
+}
+
+function requestCurrentCourierLocation(force = false) {
+  if (!state.profile?.online || !("geolocation" in navigator)) return;
+  navigator.geolocation.getCurrentPosition((position) => {
+    state.latestCourierPosition = position;
+    sendCourierLocation(position, force);
+  }, (error) => {
+    console.error("No se pudo consultar la ubicación actual:", error);
+  }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+}
+
+function resumeCourierLocationTracking() {
+  if (state.profile?.role === "motorizado" && state.profile.online) {
+    if (state.courierLocationWatchId === null && "geolocation" in navigator) startCourierLocationTracking();
+    else requestCurrentCourierLocation(true);
+    requestCourierWakeLock();
+  }
 }
 
 function startCourierLocationTracking() {
@@ -221,34 +287,18 @@ function startCourierLocationTracking() {
   }
   if (state.courierLocationWatchId !== null) return;
   state.courierLocationError = "";
-  state.courierLocationWatchId = navigator.geolocation.watchPosition(async (position) => {
-    if (!state.profile?.online || state.courierLocationWritePending || Date.now() - state.lastCourierLocationSentAt < 15000) return;
-    state.courierLocationWritePending = true;
-    try {
-      const { error } = await supabase.rpc("update_courier_location", {
-        p_latitude: position.coords.latitude,
-        p_longitude: position.coords.longitude,
-        p_accuracy: position.coords.accuracy
-      });
-      if (error) throw error;
-      if (!state.profile?.online) return;
-      state.lastCourierLocationSentAt = Date.now();
-      state.courierLocationError = "";
-    } catch (error) {
-      console.error("No se pudo guardar la ubicación del motorizado:", error);
-      state.courierLocationError = "No se pudo actualizar tu ubicación. Verifica tu conexión y los permisos de Supabase.";
-      showToast(state.courierLocationError, true);
-      stopCourierLocationTracking();
-    } finally {
-      state.courierLocationWritePending = false;
-    }
+  requestCourierWakeLock();
+  state.courierLocationWatchId = navigator.geolocation.watchPosition((position) => {
+    state.latestCourierPosition = position;
+    sendCourierLocation(position);
   }, (error) => {
-    stopCourierLocationTracking();
     state.courierLocationError = error.code === error.PERMISSION_DENIED
       ? "Permiso de ubicación denegado. Actívalo en los ajustes del navegador para aparecer en Monitoreo."
       : "No se pudo obtener la ubicación. Comprueba el GPS del teléfono e inténtalo de nuevo.";
     showToast(state.courierLocationError, true);
-  }, { enableHighAccuracy: false, maximumAge: 15000, timeout: 20000 });
+  }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+  state.locationRefreshTimer = setInterval(() => requestCurrentCourierLocation(), 15000);
+  requestCurrentCourierLocation(true);
 }
 
 function renderAuth() {

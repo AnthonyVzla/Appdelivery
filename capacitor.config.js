@@ -9,8 +9,7 @@ const config = {
   },
   android: {
     allowMixedContent: false,
-    backgroundColor: '#111014',
-    useLegacyBridge: true
+    backgroundColor: '#111014'
   }
 };
 export default config;

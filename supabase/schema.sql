@@ -365,25 +365,26 @@ begin
 end;
 $$;
 
-create or replace function public.cancel_order(order_id uuid, cancellation_reason text)
+drop function if exists public.cancel_order(uuid, text);
+create or replace function public.cancel_order(order_id uuid, p_reason text)
 returns void language plpgsql security definer set search_path = public
 as $$
 begin
   if not public.is_staff() then
     raise exception 'Solo soporte o administración puede cancelar pedidos.';
   end if;
-  if btrim(coalesce(cancellation_reason, '')) = '' then
+  if btrim(coalesce(p_reason, '')) = '' then
     raise exception 'Debe indicar la razón de la cancelación.';
   end if;
-  update public.orders
+  update public.orders as o
   set status = 'cancelled',
       released = false,
       courier_id = null,
       courier_name = null,
-      cancellation_reason = btrim(cancellation_reason),
+      cancellation_reason = btrim(p_reason),
       cancelled_at = now(),
       cancelled_by = auth.uid()
-  where id = order_id and status <> 'delivered' and status <> 'cancelled';
+  where o.id = order_id and o.status <> 'delivered' and o.status <> 'cancelled';
   if not found then
     raise exception 'El pedido ya fue entregado, cancelado o no existe.';
   end if;
@@ -584,6 +585,32 @@ $$;
 revoke all on function public.set_courier_online(boolean) from public;
 revoke all on function public.update_courier_location(double precision, double precision, double precision) from public;
 revoke all on function public.create_order(uuid, text, text, text, text, text, numeric, uuid) from public;
+drop function if exists public.cancel_order(uuid, text);
+create or replace function public.cancel_order(order_id uuid, p_reason text)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_staff() then
+    raise exception 'Solo soporte o administración puede cancelar pedidos.';
+  end if;
+  if btrim(coalesce(p_reason, '')) = '' then
+    raise exception 'Debe indicar la razón de la cancelación.';
+  end if;
+  update public.orders as o
+  set status = 'cancelled',
+      released = false,
+      courier_id = null,
+      courier_name = null,
+      cancellation_reason = btrim(p_reason),
+      cancelled_at = now(),
+      cancelled_by = auth.uid()
+  where o.id = order_id and o.status not in ('delivered', 'cancelled');
+  if not found then
+    raise exception 'El pedido ya fue entregado, cancelado o no existe.';
+  end if;
+end;
+$$;
+
 revoke all on function public.cancel_order(uuid, text) from public;
 revoke all on function public.release_order(uuid) from public;
 revoke all on function public.heartbeat_courier() from public;

@@ -1472,7 +1472,7 @@ async function cancelOrder(id) {
     if (reason === null) return;
     if (!reason.trim()) showToast("Debes indicar una razón para cancelar el pedido.", true);
   }
-  await updateOrder(id, "cancel_order", { cancellation_reason: reason.trim() });
+  await updateOrder(id, "cancel_order", { p_reason: reason.trim() });
 }
 
 async function updateOrder(id, action, args = {}) {

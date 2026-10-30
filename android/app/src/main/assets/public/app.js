@@ -6,7 +6,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
-const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado" };
+const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado", cancelled: "Cancelado" };
 const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map() };
 
 function escapeHtml(value = "") {
@@ -674,6 +674,12 @@ async function showNativeCourierAlarm(kind, order) {
 }
 
 async function stopNativeCourierAlarm(orderId) {
+  const incomingAudio = state.alertAudio.incoming;
+  if (incomingAudio) {
+    incomingAudio.pause();
+    incomingAudio.currentTime = 0;
+  }
+  if (typeof navigator.vibrate === "function") navigator.vibrate(0);
   const plugin = nativeNotificationPlugin();
   if (!plugin) return;
   await plugin.cancel({ notifications: [{ id: notificationId(orderId) }] });
@@ -683,11 +689,12 @@ function reconcileCourierAlarms() {
   if (state.profile?.role !== "motorizado") return;
   for (const orderId of [...state.courierAlarms.keys()]) {
     const order = state.orders.find((item) => item.id === orderId);
-    const keepForThisCourier = order && (
-      (order.status === "pending" && order.released && state.profile.online)
-      || (order.courier_id === state.profile.id && order.status !== "delivered")
-    );
-    if (!keepForThisCourier) stopCourierAlarm(orderId);
+    const keepAvailableAlarm = order
+      && order.status === "pending"
+      && order.released
+      && !order.courier_id
+      && state.profile.online;
+    if (!keepAvailableAlarm) stopCourierAlarm(orderId);
   }
 }
 
@@ -777,7 +784,7 @@ function renderPendingOrders() {
 }
 
 function renderAllyOrders(history) {
-  const orders = state.orders.filter((order) => history ? order.status === "delivered" : order.status !== "delivered");
+  const orders = state.orders.filter((order) => history ? order.status === "delivered" : !["delivered", "cancelled"].includes(order.status));
   return `<p class="muted">${history ? "Pedidos entregados de tu aliado." : "Pedidos en espera de soporte, asignados o en curso."}</p><div class="list">${renderOrderCards(orders, history ? "completed" : "ally")}</div>`;
 }
 
@@ -936,10 +943,10 @@ function renderDashboard() {
   const createdToday = state.orders.filter((order) => new Date(order.created_at) >= today && (role !== "motorizado" || order.courier_id === state.profile.id));
   const completed = state.orders.filter((order) => order.status === "delivered" && new Date(order.delivered_at) >= today);
   const revenue = completed.reduce((sum, order) => sum + (role === "motorizado" ? courierEarnings(order) : Number(order.delivery_fee)), 0);
-  const activeOrders = state.orders.filter((order) => order.status !== "delivered");
+  const activeOrders = state.orders.filter((order) => !["delivered", "cancelled"].includes(order.status));
   return `<div class="grid metrics">
     <article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${completed.length} entregas finalizadas</span></article>
-    <article class="card"><span class="metric-label">${role === "motorizado" ? "Tu ganancia hoy (${courierEarningsPercentage()}%)" : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
+    <article class="card"><span class="metric-label">${role === "motorizado" ? `Tu ganancia hoy (${courierEarningsPercentage()}%)` : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
     <article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${role === "motorizado" ? (state.profile.online ? "1" : "0") : countOnline()}</div><span class="metric-foot">Disponibles en este momento</span></article>
   </div>
   <div class="section-head"><h2>${role === "motorizado" ? "Tus entregas activas" : "Pedidos en curso"}</h2></div>
@@ -1060,6 +1067,9 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<a class="button success small" target="_blank" rel="noopener noreferrer" href="${whatsappUrl(order.client_phone, allyName)}">Contactar cliente</a>`);
     }
     if (context === "pending" && !order.released) buttons.push(`<button class="button primary small" data-action="release" data-id="${order.id}">Liberar pedido</button>`);
+    if (["staff", "pending"].includes(context) && state.profile.role === "soporte" && !["delivered", "cancelled"].includes(order.status)) {
+      buttons.push(`<button class="button danger small" data-action="cancel-order" data-id="${order.id}">Cancelar pedido</button>`);
+    }
     if (context === "staff" && order.status === "assigned" && !order.at_store_at && ["administracion", "soporte"].includes(state.profile.role)) {
       buttons.push(`<label class="assign-control">Nuevo motorizado<select data-reassign-select="${order.id}"><option value="">Selecciona un motorizado activo…</option>${activeCouriers().filter((profile) => profile.id !== order.courier_id).map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
       buttons.push(`<button class="button primary small" data-action="reassign" data-id="${order.id}">Reasignar pedido</button>`);
@@ -1075,7 +1085,7 @@ function renderOrderCards(orders, context = "") {
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
       ${renderDeadline(order)}
       ${context === "current" && order.allies?.location_url ? `<div class="merchant-location"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button></div>` : ""}
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}<br>${priceLabel}</p>
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}${order.status === "cancelled" ? `<br><strong>Motivo de cancelación:</strong> ${escapeHtml(order.cancellation_reason || "No indicado")}<br><strong>Cancelado:</strong> ${dateTime(order.cancelled_at)}` : ""}<br>${priceLabel}</p>
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
@@ -1086,7 +1096,7 @@ function renderCourierAvailable() {
 }
 
 function renderCourierCurrent() {
-  const orders = state.orders.filter((order) => order.courier_id === state.profile.id && order.status !== "delivered");
+  const orders = state.orders.filter((order) => order.courier_id === state.profile.id && !["delivered", "cancelled"].includes(order.status));
   return `<div class="list">${renderOrderCards(orders, "current")}</div>`;
 }
 
@@ -1125,7 +1135,7 @@ function renderCompletedOrders() {
 }
 
 function renderStaffOrders() {
-  return `<div class="toolbar"><label>Filtrar por estado<select id="staff-status"><option value="active">En curso</option><option value="pending">Sin asignar</option><option value="assigned">Asignados</option><option value="at_store">En el comercio</option><option value="in_transit">En camino</option><option value="all">Todos</option></select></label></div><div id="staff-orders" class="list">${renderOrderCards(state.orders.filter((order) => order.status !== "delivered"), "staff")}</div>`;
+  return `<div class="toolbar"><label>Filtrar por estado<select id="staff-status"><option value="active">En curso</option><option value="pending">Sin asignar</option><option value="assigned">Asignados</option><option value="at_store">En el comercio</option><option value="in_transit">En camino</option><option value="cancelled">Cancelados</option><option value="all">Todos</option></select></label></div><div id="staff-orders" class="list">${renderOrderCards(state.orders.filter((order) => !["delivered", "cancelled"].includes(order.status)), "staff")}</div>`;
 }
 
 function renderCreateOrder() {
@@ -1293,7 +1303,7 @@ function bindScreenActions() {
   const staffStatus = document.querySelector("#staff-status");
   if (staffStatus) staffStatus.addEventListener("change", () => {
     const value = staffStatus.value;
-    const orders = value === "active" ? state.orders.filter((order) => order.status !== "delivered") : value === "all" ? state.orders : state.orders.filter((order) => order.status === value);
+    const orders = value === "active" ? state.orders.filter((order) => !["delivered", "cancelled"].includes(order.status)) : value === "all" ? state.orders : state.orders.filter((order) => order.status === value);
     document.querySelector("#staff-orders").innerHTML = renderOrderCards(orders, "staff");
     bindOrderActions();
   });
@@ -1338,6 +1348,7 @@ function bindOrderActions() {
     if (select.value) updateOrder(select.dataset.id, "assign_order", { target_courier: select.value });
   }));
   document.querySelectorAll('[data-action="release"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "release_order")));
+  document.querySelectorAll('[data-action="cancel-order"]').forEach((button) => button.addEventListener("click", () => cancelOrder(button.dataset.id)));
   document.querySelectorAll('[data-action="reassign"]').forEach((button) => button.addEventListener("click", () => {
     const select = document.querySelector(`[data-reassign-select="${button.dataset.id}"]`);
     if (!select?.value) return showToast("Selecciona el motorizado que recibirá el pedido.", true);
@@ -1452,6 +1463,16 @@ async function deleteUser(id) {
   showToast("Cuenta eliminada; se conservó el historial de pedidos.");
   await refreshData(false);
   renderApp();
+}
+
+async function cancelOrder(id) {
+  let reason = "";
+  while (!reason.trim()) {
+    reason = window.prompt("Indica la razón de la cancelación del pedido:");
+    if (reason === null) return;
+    if (!reason.trim()) showToast("Debes indicar una razón para cancelar el pedido.", true);
+  }
+  await updateOrder(id, "cancel_order", { cancellation_reason: reason.trim() });
 }
 
 async function updateOrder(id, action, args = {}) {

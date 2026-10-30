@@ -162,7 +162,7 @@ async function loadProfile() {
     }
     await refreshData(true);
     renderIfSafe();
-  }, 18000);
+  }, state.profile.role === "motorizado" ? 5000 : 18000);
 }
 
 function renderIfSafe() {
@@ -179,11 +179,21 @@ function startRealtime() {
   if (state.realtime) supabase.removeChannel(state.realtime);
   const channel = supabase.channel(`updates-${state.profile.id}`);
   if (state.profile.role === "motorizado") {
-    channel.on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async () => {
+    channel.on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async (payload) => {
+      const locallyOwnedOrder = payload.new
+        ? state.orders.find((order) => order.id === payload.new.id && order.courier_id === state.profile.id)
+        : null;
+      if (payload.eventType === "UPDATE" && locallyOwnedOrder && payload.new?.courier_id !== state.profile.id) {
+        state.orders = state.orders.filter((order) => order.id !== payload.new.id);
+        renderIfSafe();
+      }
+      const assignedOrder = payload.new && payload.new.courier_id === state.profile.id
+        ? { ...payload.new, allies: state.allies.find((ally) => ally.id === payload.new.ally_id) }
+        : null;
       await refreshData(true);
-      renderIfSafe();
-    }).on("postgres_changes", { event: "UPDATE", schema: "public", table: "orders", filter: `courier_id=eq.${state.profile.id}` }, async () => {
-      await refreshData(true);
+      if (assignedOrder && payload.eventType === "UPDATE") {
+        emitCourierNotification("assigned", assignedOrder);
+      }
       renderIfSafe();
     });
   } else {
@@ -933,7 +943,7 @@ function renderOrderCards(orders, context = "") {
 }
 
 function renderCourierAvailable() {
-  const orders = state.orders.filter((order) => order.status === "pending");
+  const orders = state.orders.filter((order) => order.status === "pending" && order.released !== false);
   return `<p class="muted">Toma un pedido disponible para asignarlo a tu cuenta. Solo podrás recibir pedidos mientras estés activo.</p><div class="list">${renderOrderCards(state.profile.online ? orders : [], "available")}</div>`;
 }
 
@@ -1277,8 +1287,21 @@ async function deleteUser(id) {
 }
 
 async function updateOrder(id, action, args = {}) {
+  const previousOrder = action === "claim_order" ? state.orders.find((order) => order.id === id) : null;
+  if (action === "claim_order") {
+    state.orders = state.orders.map((order) => order.id === id
+      ? { ...order, status: "assigned", courier_id: state.profile.id, courier_name: state.profile.full_name, assigned_at: new Date().toISOString(), courier: { full_name: state.profile.full_name, username: state.profile.username } }
+      : order);
+    if (state.screen === "activos") renderApp();
+  }
   const { error } = await supabase.rpc(action, { order_id: id, ...args });
-  if (error) return reportError(error);
+  if (error) {
+    if (previousOrder) {
+      state.orders = state.orders.map((order) => order.id === id ? previousOrder : order);
+      renderApp();
+    }
+    return reportError(error);
+  }
   showToast(action === "claim_order" ? "Pedido asignado a tu cuenta." : action === "assign_order" ? "Pedido asignado al motorizado." : action === "release_order" ? "Pedido liberado para motorizados activos." : "Estado del pedido actualizado.");
   await refreshData(true);
   renderApp();

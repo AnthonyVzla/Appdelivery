@@ -5,9 +5,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
-const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado" };
+const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado", cliente: "Cliente" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado", cancelled: "Cancelado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map() };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], customerKyc: null, kycSubmissions: [], serviceApplications: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, serviceMap: null, serviceMarkers: {}, serviceMapContainer: null, serviceDraft: { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null }, placeSearchTimers: {}, placeSearchResults: { pickup: [], destination: [] }, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map(), pushToken: null, pushListenersReady: false, pushRegistrationResolve: null };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -19,7 +19,7 @@ function legalFooter() {
 
 function renderAudioActivationPrompt() {
   if (state.profile.role === "motorizado" && !state.alertsEnabled) {
-    return `<aside class="audio-activation" role="status"><div><strong>Activa las alertas de pedidos</strong><p>Permite el sonido de pedidos entrantes y asignados en este dispositivo.</p></div><button class="button primary" data-action="alerts">Activar alertas</button></aside>`;
+    return `<aside class="audio-activation" role="status"><div><strong>Activa las alertas de pedidos</strong><p>Habilita el sonido y las notificaciones de pedidos en este dispositivo.</p></div><button class="button primary" data-action="alerts">Activar alertas</button></aside>`;
   }
   if (["soporte", "administracion"].includes(state.profile.role) && !state.overdueSoundsEnabled) {
     return `<aside class="audio-activation" role="status"><div><strong>Activa la alarma de retrasos</strong><p>Habilita el sonido para pedidos que superen los 10 minutos sin llegar al comercio.</p></div><button class="button primary" data-action="overdue-sound">Activar alarma</button></aside>`;
@@ -27,8 +27,17 @@ function renderAudioActivationPrompt() {
   return "";
 }
 
-function formatMoney(value) {
-  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(Number(value || 0));
+function formatMoney(value, currency = "COP") {
+  return new Intl.NumberFormat("es-CO", { style: "currency", currency, minimumFractionDigits: currency === "USD" ? 2 : 0, maximumFractionDigits: 2 }).format(Number(value || 0));
+}
+
+function formatMoneyTotals(orders, amountForOrder) {
+  const totals = new Map();
+  for (const order of orders) {
+    const currency = order.currency || "COP";
+    totals.set(currency, (totals.get(currency) || 0) + Number(amountForOrder(order) || 0));
+  }
+  return [...totals].map(([currency, amount]) => formatMoney(amount, currency)).join(" · ") || formatMoney(0);
 }
 
 function dateTime(value) {
@@ -79,7 +88,7 @@ function setupServiceWorkerUpdates() {
 
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (state.reloadingForUpdate) return;
-    if (state.screen === "crear" && hasUnsavedFormData()) {
+    if (["crear", "servicio"].includes(state.screen) && hasUnsavedFormData()) {
       state.updatePending = true;
       showToast("Nueva versión lista. Se actualizará al terminar o salir del formulario.");
       return;
@@ -111,7 +120,7 @@ function checkServiceWorkerUpdate() {
 }
 
 function hasUnsavedFormData() {
-  return [...app.querySelectorAll("form input, form textarea, form select")]
+  return [...app.querySelectorAll("form input:not([type=checkbox]):not([type=radio]):not([type=file]), form textarea")]
     .some((field) => field.value.trim() !== "");
 }
 
@@ -126,6 +135,12 @@ function applyPendingServiceWorkerUpdate() {
 
 async function loadProfile() {
   stopCourierLocationTracking();
+  destroyServiceMap();
+  state.customerKyc = null;
+  state.kycSubmissions = [];
+  state.serviceApplications = [];
+  state.serviceDraft = { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null };
+  state.placeSearchResults = { pickup: [], destination: [] };
   const { data, error } = await supabase.from("profiles").select("*").eq("id", state.session.user.id).maybeSingle();
   if (error) return reportError(error);
   if (!data) {
@@ -141,6 +156,9 @@ async function loadProfile() {
   if (!data.approved || !data.role || data.suspended) {
     renderPending();
     return;
+  }
+  if (data.role === "motorizado" && window.Capacitor?.isNativePlatform?.()) {
+    void setupCourierPushListeners().catch((error) => console.error("No se pudieron preparar los eventos push:", error));
   }
   if (data.role === "motorizado" && data.online) {
     const { error: heartbeatError } = await supabase.rpc("heartbeat_courier");
@@ -166,7 +184,7 @@ async function loadProfile() {
 }
 
 function renderIfSafe() {
-  if (state.screen === "crear") return;
+  if (["crear", "servicio"].includes(state.screen)) return;
   if (state.screen === "monitoreo") {
     refreshMonitoringView();
     return;
@@ -362,7 +380,7 @@ function renderAuth() {
       <img class="brand-logo" src="./images (1).png" alt="A un paso delivery">
       <p class="eyebrow">GESTIÓN DE ENTREGAS</p>
       <h1>${isRegister ? "Crea tu cuenta" : "Bienvenido"}</h1>
-      <p class="muted">${isRegister ? "Regístrate y espera la aprobación de administración." : "Ingresa a tu cuenta para continuar."}</p>
+      <p class="muted">${isRegister ? "Crea tu cuenta de cliente y luego verifica tu perfil para solicitar servicios." : "Ingresa a tu cuenta para continuar."}</p>
       <form id="auth-form" class="stack">
         ${isRegister ? `<div class="stack"><label>Nombre<input name="firstName" autocomplete="given-name" required></label><label>Apellido<input name="lastName" autocomplete="family-name" required></label><label>Teléfono<input name="phone" type="tel" autocomplete="tel" required></label></div>` : ""}
         <label>Usuario<input name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" title="Usa de 3 a 32 letras, números, punto, guion o guion bajo." autocapitalize="none"></label>
@@ -371,7 +389,7 @@ function renderAuth() {
         <button class="button primary full" id="auth-submit">${isRegister ? "Crear cuenta" : "Iniciar sesión"}</button>
       </form>
       <button class="text-button" id="auth-toggle">${isRegister ? "¿Ya tienes cuenta? Iniciar sesión" : "¿No tienes cuenta? Crear cuenta"}</button>
-      <p class="fine-print">El acceso a cuentas nuevas requiere aprobación de administración.</p>
+      <p class="fine-print">Las cuentas nuevas comienzan como clientes. Los servicios requieren verificación de identidad.</p>
     </div></section>${legalFooter()}</div>`;
   document.querySelector("#auth-toggle").addEventListener("click", () => {
     state.authMode = isRegister ? "login" : "register";
@@ -402,7 +420,7 @@ async function submitAuth(event) {
         errorNode.textContent = "La cuenta se creó. En Supabase, desactiva la confirmación por correo para permitir el acceso con usuario y contraseña (no se solicita correo).";
         errorNode.classList.remove("hidden");
       } else {
-        showToast("Cuenta creada. Espera la aprobación de administración.");
+        showToast("Cuenta creada como cliente. Completa la verificación de identidad en tu perfil.");
         state.session = data.session;
         await loadProfile();
       }
@@ -470,6 +488,32 @@ async function refreshData(quiet) {
     if (["soporte", "administracion"].includes(state.profile.role)) await refreshCourierLocations(quiet);
     refreshActiveCourierOptions();
   }
+  if (state.profile.role === "cliente") {
+    const [profileResult, kycResult, applicationResult] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", state.profile.id).maybeSingle(),
+      supabase.from("customer_kyc").select("*").eq("user_id", state.profile.id).maybeSingle(),
+      supabase.from("service_applications").select("*").eq("user_id", state.profile.id).order("submitted_at", { ascending: false })
+    ]);
+    if (profileResult.error || kycResult.error || applicationResult.error) {
+      if (!quiet) reportError(profileResult.error || kycResult.error || applicationResult.error);
+      return;
+    }
+    if (profileResult.data) state.profile = profileResult.data;
+    state.customerKyc = kycResult.data;
+    state.serviceApplications = applicationResult.data || [];
+  }
+  if (state.profile.role === "administracion") {
+    const [kycResult, applicationResult] = await Promise.all([
+      supabase.from("customer_kyc").select("*, profiles!customer_kyc_user_id_fkey(full_name, username, phone)").order("submitted_at", { ascending: false }),
+      supabase.from("service_applications").select("*, profiles!service_applications_user_id_fkey(full_name, username, phone, avatar_path)").order("submitted_at", { ascending: false })
+    ]);
+    if (kycResult.error || applicationResult.error) {
+      if (!quiet) reportError(kycResult.error || applicationResult.error);
+      return;
+    }
+    state.kycSubmissions = kycResult.data || [];
+    state.serviceApplications = applicationResult.data || [];
+  }
 }
 
 async function refreshCourierLocations(quiet = true) {
@@ -501,6 +545,15 @@ function activeCouriers() {
   );
 }
 
+function couriersForOrder(order) {
+  const couriers = activeCouriers();
+  return order.service_type === "traslado"
+    ? couriers.filter((profile) => !state.orders.some((activeOrder) =>
+      activeOrder.courier_id === profile.id && ["assigned", "at_store", "in_transit"].includes(activeOrder.status)
+    ))
+    : couriers;
+}
+
 function refreshActiveCourierOptions() {
   const select = document.querySelector("#assigned-courier");
   if (!select) return;
@@ -519,8 +572,9 @@ function refreshActiveCourierOptions() {
 const navItems = {
   motorizado: [["inicio", "Resumen"], ["activos", "Pedidos activos"], ["curso", "Pedido en curso"], ["entregados", "Entregados"]],
   soporte: [["inicio", "Resumen"], ["crear", "Crear pedido"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["monitoreo", "Monitoreo"], ["aliados", "Aliados"]],
-  administracion: [["inicio", "Resumen"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["monitoreo", "Monitoreo"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]],
-  aliado: [["crear", "Crear pedido"], ["mis_pedidos", "Pedidos en curso"], ["historial", "Historial"]]
+  administracion: [["inicio", "Resumen"], ["pendientes", "Pedidos pendientes"], ["pedidos", "Pedidos"], ["entregados", "Finalizados"], ["motorizados", "Motorizados activos"], ["monitoreo", "Monitoreo"], ["verificaciones", "Verificaciones"], ["aspirantes", "Aspirantes"], ["usuarios", "Usuarios"], ["aliados", "Aliados"], ["reportes", "Reportes"], ["metricas", "Métricas"]],
+  aliado: [["crear", "Crear pedido"], ["mis_pedidos", "Pedidos en curso"], ["historial", "Historial"]],
+  cliente: [["servicio", "Realizar servicio"], ["historial_cliente", "Historial"], ["perfil_cliente", "Perfil"]]
 };
 
 function renderApp() {
@@ -536,7 +590,7 @@ function renderApp() {
     </aside>
     <main class="main">
       <header class="topbar"><div><div class="mobile-brand"><img src="./images (1).png" alt=""><strong>A un paso delivery</strong></div><h1>${escapeHtml(titleFor(state.screen))}</h1><p>${new Intl.DateTimeFormat("es-CO", { dateStyle: "full" }).format(new Date())}</p></div>
-        ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label><button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button></div>` : `<div class="header-actions">${["soporte", "administracion"].includes(state.profile.role) ? `<button class="button subtle small" data-action="overdue-sound" aria-pressed="${state.overdueSoundsEnabled}">${state.overdueSoundsEnabled ? "Alarma activada" : "Activar alarma"}</button><span class="badge green">${countOnline()} motorizados activos</span>` : ""}${["soporte", "administracion", "aliado"].includes(state.profile.role) ? `<button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button>` : ""}</div>`}
+        ${state.profile.role === "motorizado" ? `<div class="header-actions"><button class="button subtle small" data-action="alerts" aria-pressed="${state.alertsEnabled}">${state.alertsEnabled ? "Desactivar alertas" : "Activar alertas"}</button><label class="switch-row"><span class="muted">${state.profile.online ? "Activo" : "Desconectado"}</span><span class="switch"><input type="checkbox" data-action="online" ${state.profile.online ? "checked" : ""} aria-label="Disponibilidad"><span></span></span></label><button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button></div>` : `<div class="header-actions">${["soporte", "administracion"].includes(state.profile.role) ? `<button class="button subtle small" data-action="overdue-sound" aria-pressed="${state.overdueSoundsEnabled}">${state.overdueSoundsEnabled ? "Alarma activada" : "Activar alarma"}</button><span class="badge green">${countOnline()} motorizados activos</span>` : ""}${["soporte", "administracion", "aliado", "cliente"].includes(state.profile.role) ? `<button class="button subtle small mobile-logout" data-action="logout">Cerrar sesión</button>` : ""}</div>`}
       </header>
       ${renderAudioActivationPrompt()}
       <section id="screen-content">${renderScreen()}</section>
@@ -551,6 +605,7 @@ function renderApp() {
       state.monitoringMapContainer = null;
       state.monitoringMapDidFit = false;
     }
+    if (state.screen === "servicio" && button.dataset.screen !== "servicio") destroyServiceMap();
     state.screen = button.dataset.screen;
     renderApp();
     applyPendingServiceWorkerUpdate();
@@ -568,6 +623,8 @@ function renderApp() {
   }
   bindScreenActions();
   if (state.screen === "monitoreo") void initializeMonitoringMap();
+  if (state.screen === "servicio" && state.profile.role === "cliente") void initializeServiceMap();
+  if (state.screen === "perfil_cliente" && state.profile.role === "cliente" && state.profile.avatar_path) void loadCustomerAvatar();
 }
 
 async function toggleCourierAlerts() {
@@ -580,9 +637,14 @@ async function toggleCourierAlerts() {
 
   try {
     await prepareAlertAudio("incoming");
-    await enableNativeNotifications();
+    const pushEnabled = await enableNativeNotifications();
     state.alertsEnabled = true;
-    showToast("Sonido y notificaciones de pedidos activados.");
+    const isNative = window.Capacitor?.isNativePlatform?.();
+    showToast(pushEnabled
+      ? "Sonido y notificaciones push activados."
+      : isNative
+        ? "Sonido activado. Para el push, configura Firebase y permite las notificaciones."
+        : "Alertas de sonido activadas en esta sesión.");
     renderApp();
   } catch (error) {
     reportError(new Error(`No se pudieron activar las alertas: ${error.message}`));
@@ -632,20 +694,108 @@ async function enableNativeNotifications() {
   const isNative = window.Capacitor?.isNativePlatform?.();
   if (!isNative) {
     if ("Notification" in window && Notification.permission === "default") await Notification.requestPermission();
-    return;
+    return false;
   }
   const plugin = window.Capacitor?.Plugins?.LocalNotifications;
-  if (!plugin) return;
-  await plugin.requestPermissions();
-  await plugin.createChannel({
-    id: "courier_orders",
-    name: "Pedidos disponibles y asignados",
-    description: "Alertas repetidas de pedidos pendientes",
-    importance: 5,
-    visibility: 1,
-    vibration: true,
-    sound: "default"
+  if (plugin) {
+    await plugin.requestPermissions();
+    await plugin.createChannel({
+      id: "courier_orders",
+      name: "Pedidos disponibles y asignados",
+      description: "Notificaciones de pedidos asignados y disponibles",
+      importance: 5,
+      visibility: 1,
+      vibration: true,
+      sound: "default"
+    });
+  }
+  await registerCourierPushNotifications();
+}
+
+async function registerCourierPushNotifications() {
+  const plugin = window.Capacitor?.Plugins?.PushNotifications;
+  if (state.profile?.role !== "motorizado") return;
+  if (!plugin) {
+    return false;
+  }
+  await setupCourierPushListeners(plugin);
+  const permission = await plugin.checkPermissions();
+  const requested = permission.receive === "granted" ? permission : await plugin.requestPermissions();
+  if (requested.receive !== "granted") {
+    return false;
+  }
+  let registrationTimer;
+  const registered = new Promise((resolve) => {
+    state.pushRegistrationResolve = resolve;
+    registrationTimer = setTimeout(() => {
+      state.pushRegistrationResolve = null;
+      resolve(false);
+    }, 10000);
   });
+  try {
+    await plugin.register();
+    const success = await registered;
+    clearTimeout(registrationTimer);
+    return success;
+  } catch (error) {
+    clearTimeout(registrationTimer);
+    state.pushRegistrationResolve = null;
+    console.error("Falló la solicitud de registro push:", error);
+    return false;
+  }
+}
+
+async function setupCourierPushListeners(pushPlugin = window.Capacitor?.Plugins?.PushNotifications) {
+  const plugin = pushPlugin;
+  if (!plugin || state.profile?.role !== "motorizado" || state.pushListenersReady) return;
+  if (!state.pushListenersReady) {
+    await plugin.addListener("registration", async ({ value }) => {
+      state.pushToken = value;
+      if (state.profile?.role !== "motorizado") {
+        state.pushRegistrationResolve?.(false);
+        state.pushRegistrationResolve = null;
+        return;
+      }
+      try {
+        const { error } = await supabase.rpc("register_courier_push_token", { p_token: value });
+        if (error) {
+          reportError(error);
+          state.pushRegistrationResolve?.(false);
+        } else {
+          state.pushRegistrationResolve?.(true);
+        }
+      } catch (error) {
+        reportError(error);
+        state.pushRegistrationResolve?.(false);
+      }
+      state.pushRegistrationResolve = null;
+    });
+    await plugin.addListener("registrationError", (error) => {
+      console.error("No se pudo registrar el dispositivo para push:", error);
+      state.pushRegistrationResolve?.(false);
+      state.pushRegistrationResolve = null;
+    });
+    await plugin.addListener("pushNotificationReceived", async (notification) => {
+      if (state.profile?.role !== "motorizado") return;
+      await refreshData(true);
+      const orderId = notification.data?.order_id;
+      const kind = notification.data?.kind;
+      const order = state.orders.find((item) => item.id === orderId);
+      if (!order) return;
+      if (kind === "assigned" && order.courier_id === state.profile.id) {
+        emitCourierNotification("assigned", order);
+      } else if (kind === "available" && order.status === "pending" && order.released && state.profile.online) {
+        emitCourierNotification("incoming", order);
+      }
+    });
+    await plugin.addListener("pushNotificationActionPerformed", async ({ notification }) => {
+      if (state.profile?.role !== "motorizado") return;
+      state.screen = notification.data?.kind === "assigned" ? "curso" : "activos";
+      await refreshData(true);
+      renderApp();
+    });
+    state.pushListenersReady = true;
+  }
 }
 
 function nativeNotificationPlugin() {
@@ -761,7 +911,7 @@ function emitCourierNotification(kind, order) {
 }
 
 function titleFor(screen) {
-  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", pendientes: "Pedidos pendientes", mis_pedidos: "Pedidos en curso", historial: "Historial", motorizados: "Motorizados activos", monitoreo: "Monitoreo", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas" })[screen] || "A un paso delivery";
+  return ({ inicio: "Resumen", activos: "Pedidos activos", curso: "Pedido en curso", entregados: "Pedidos entregados", crear: "Crear pedido", pedidos: "Pedidos", pendientes: "Pedidos pendientes", mis_pedidos: "Pedidos en curso", historial: "Historial", motorizados: "Motorizados activos", monitoreo: "Monitoreo", aliados: "Aliados", usuarios: "Usuarios", reportes: "Reportes", metricas: "Métricas", verificaciones: "Verificaciones KYC", aspirantes: "Aspirantes", servicio: "Realizar servicio", historial_cliente: "Historial de servicios", perfil_cliente: "Mi perfil" })[screen] || "A un paso delivery";
 }
 
 function countOnline() {
@@ -777,6 +927,11 @@ function dayStart(date = new Date()) {
 
 function renderScreen() {
   const role = state.profile.role;
+  if (role === "cliente") {
+    if (state.screen === "servicio") return renderCustomerService();
+    if (state.screen === "historial_cliente") return renderCustomerHistory();
+    if (state.screen === "perfil_cliente") return renderCustomerProfile();
+  }
   if (role === "aliado") {
     if (state.screen === "crear") return renderCreateOrder();
     if (state.screen === "mis_pedidos") return renderAllyOrders(false);
@@ -795,6 +950,8 @@ function renderScreen() {
   if (state.screen === "usuarios" && role === "administracion") return renderUsers();
   if (state.screen === "reportes" && role === "administracion") return renderReports();
   if (state.screen === "metricas" && role === "administracion") return renderMetrics();
+  if (state.screen === "verificaciones" && role === "administracion") return renderKycReviews();
+  if (state.screen === "aspirantes" && role === "administracion") return renderApplicationReviews();
   return `<div class="empty">Selecciona una sección.</div>`;
 }
 
@@ -962,11 +1119,11 @@ function renderDashboard() {
   const today = dayStart();
   const createdToday = state.orders.filter((order) => new Date(order.created_at) >= today && (role !== "motorizado" || order.courier_id === state.profile.id));
   const completed = state.orders.filter((order) => order.status === "delivered" && new Date(order.delivered_at) >= today);
-  const revenue = completed.reduce((sum, order) => sum + (role === "motorizado" ? courierEarnings(order) : Number(order.delivery_fee)), 0);
+  const revenue = formatMoneyTotals(completed, (order) => role === "motorizado" ? courierEarnings(order) : Number(order.delivery_fee));
   const activeOrders = state.orders.filter((order) => !["delivered", "cancelled"].includes(order.status));
   return `<div class="grid metrics">
     <article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${completed.length} entregas finalizadas</span></article>
-    <article class="card"><span class="metric-label">${role === "motorizado" ? `Tu ganancia hoy (${courierEarningsPercentage()}%)` : "Delivery generado hoy"}</span><div class="metric-value">${formatMoney(revenue)}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
+    <article class="card"><span class="metric-label">${role === "motorizado" ? `Tu ganancia hoy (${courierEarningsPercentage()}%)` : "Delivery generado hoy"}</span><div class="metric-value metric-text">${revenue}</div><span class="metric-foot">${role === "motorizado" ? "Tu parte de los pedidos entregados" : "Suma de costos de delivery"}</span></article>
     <article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${role === "motorizado" ? (state.profile.online ? "1" : "0") : countOnline()}</div><span class="metric-foot">Disponibles en este momento</span></article>
   </div>
   <div class="section-head"><h2>${role === "motorizado" ? "Tus entregas activas" : "Pedidos en curso"}</h2></div>
@@ -1071,12 +1228,13 @@ async function playOverdueAlarm() {
 function renderOrderCards(orders, context = "") {
   if (!orders.length) return `<div class="empty">No hay pedidos para mostrar.</div>`;
   return orders.map((order) => {
-    const allyName = order.allies?.name || "Aliado";
+    const serviceNames = { traslado: "Traslado", encomienda: "Encomienda", compra: "Compra", delivery: "Delivery" };
+    const allyName = order.allies?.name || (serviceNames[order.service_type] ? `Servicio · ${serviceNames[order.service_type]}` : "Aliado");
     const ally = escapeHtml(allyName);
     const courier = escapeHtml(order.courier?.full_name || "Sin asignar");
     const buttons = [];
     if (context === "available") {
-      buttons.push(`<span class="badge green courier-earnings">Tu ganancia: ${formatMoney(courierEarnings(order))}</span>`);
+      buttons.push(`<span class="badge green courier-earnings">Tu ganancia: ${formatMoney(courierEarnings(order), order.currency)}</span>`);
       buttons.push(`<button class="button primary small" data-action="claim" data-id="${order.id}">Tomar pedido</button>`);
     }
     if (context === "current") {
@@ -1086,32 +1244,44 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<button class="button subtle small" data-action="copy-phone" data-phone="${escapeHtml(order.client_phone)}">Copiar teléfono</button>`);
       buttons.push(`<a class="button success small" target="_blank" rel="noopener noreferrer" href="${whatsappUrl(order.client_phone, allyName)}">Contactar cliente</a>`);
     }
-    if (context === "pending" && !order.released) buttons.push(`<button class="button primary small" data-action="release" data-id="${order.id}">Liberar pedido</button>`);
+    if (context === "pending" && !order.released && (!order.service_type || order.service_type === "traslado")) {
+      buttons.push(`<button class="button primary small" data-action="release" data-id="${order.id}">${order.service_type ? "Aprobar y liberar servicio" : "Liberar pedido"}</button>`);
+    }
+    if (["staff", "pending"].includes(context) && order.service_type && order.status === "pending" && !order.released && ["administracion", "soporte"].includes(state.profile.role)) {
+      buttons.push(`<label class="assign-control">Asignar al cotizar<select data-quote-courier="${order.id}"><option value="">Dejar disponible</option>${activeCouriers().map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
+      buttons.push(`<button class="button primary small" data-action="quote-service" data-id="${order.id}">Cotizar y liberar</button>`);
+    }
     if (["staff", "pending"].includes(context) && state.profile.role === "soporte" && !["delivered", "cancelled"].includes(order.status)) {
       buttons.push(`<button class="button danger small" data-action="cancel-order" data-id="${order.id}">Cancelar pedido</button>`);
     }
     if (context === "staff" && order.status === "assigned" && !order.at_store_at && ["administracion", "soporte"].includes(state.profile.role)) {
-      buttons.push(`<label class="assign-control">Nuevo motorizado<select data-reassign-select="${order.id}"><option value="">Selecciona un motorizado activo…</option>${activeCouriers().filter((profile) => profile.id !== order.courier_id).map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
+      buttons.push(`<label class="assign-control">Nuevo motorizado<select data-reassign-select="${order.id}"><option value="">Selecciona un motorizado activo…</option>${couriersForOrder(order).filter((profile) => profile.id !== order.courier_id).map((profile) => `<option value="${profile.id}">${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
       buttons.push(`<button class="button primary small" data-action="reassign" data-id="${order.id}">Reasignar pedido</button>`);
       buttons.push(`<button class="button subtle small" data-action="release" data-id="${order.id}">Liberar para que otro lo tome</button>`);
     } else if (["staff", "pending"].includes(context) && ["administracion", "soporte"].includes(state.profile.role) && order.status === "pending") {
-      buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${activeCouriers().map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
+      buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${couriersForOrder(order).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     const isCourier = state.profile.role === "motorizado";
-    const priceLabel = isCourier ? `<strong>Tu ganancia (${courierEarningsPercentage()}%):</strong> ${formatMoney(courierEarnings(order))}` : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee)}`;
+    const priceLabel = order.service_type && order.service_type !== "traslado" && !order.released
+      ? `<strong>Cotización:</strong> Pendiente de soporte`
+      : isCourier
+        ? `<strong>Tu ganancia (${courierEarningsPercentage()}%):</strong> ${formatMoney(courierEarnings(order), order.currency)}`
+        : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee, order.currency)}`;
     const orderStatus = order.status === "pending" && order.released === false && ["soporte", "administracion"].includes(state.profile.role)
-      ? `<span class="badge orange">Pendiente de soporte</span>`
+      ? `<span class="badge orange">${order.service_type && order.service_type !== "traslado" ? "Pendiente de cotización" : "Pendiente de soporte"}</span>`
       : statusBadge(order.status);
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
       ${renderDeadline(order)}
       ${context === "current" && order.allies?.location_url ? `<div class="merchant-location"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button></div>` : ""}
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br><strong>Dirección:</strong> ${escapeHtml(order.address)}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}${order.status === "cancelled" ? `<br><strong>Motivo de cancelación:</strong> ${escapeHtml(order.cancellation_reason || "No indicado")}<br><strong>Cancelado:</strong> ${dateTime(order.cancelled_at)}` : ""}<br>${priceLabel}</p>
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br>${order.service_type ? `<strong>Tipo:</strong> ${escapeHtml(serviceNames[order.service_type] || order.service_type)}${order.transport_mode ? ` · ${order.transport_mode === "express" ? "Express" : "Económico"}` : ""}<br><strong>Recogida:</strong> ${escapeHtml(order.pickup_address || "—")}<br><strong>Destino:</strong> ${escapeHtml(order.destination_address || order.address || "—")}${order.route_distance_meters ? `<br><strong>Distancia Google:</strong> ${(order.route_distance_meters / 1000).toFixed(2)} km` : ""}` : `<strong>Dirección:</strong> ${escapeHtml(order.address || "—")}`}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}${order.status === "cancelled" ? `<br><strong>Motivo de cancelación:</strong> ${escapeHtml(order.cancellation_reason || "No indicado")}<br><strong>Cancelado:</strong> ${dateTime(order.cancelled_at)}` : ""}<br>${priceLabel}</p>
+      ${order.maps_url ? `<div class="order-actions"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.maps_url)}">Abrir ubicación en Google Maps</button></div>` : ""}
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
 
 function renderCourierAvailable() {
-  const orders = state.orders.filter((order) => order.status === "pending" && order.released !== false);
+  const orders = state.orders.filter((order) => order.status === "pending" && order.released !== false)
+    .sort((left, right) => Number(right.transport_mode === "express") - Number(left.transport_mode === "express"));
   return `<p class="muted">Toma un pedido disponible para asignarlo a tu cuenta. Solo podrás recibir pedidos mientras estés activo.</p><div class="list">${renderOrderCards(state.profile.online ? orders : [], "available")}</div>`;
 }
 
@@ -1141,8 +1311,8 @@ function filteredDelivered() {
 
 function deliveredSummary() {
   const orders = filteredDelivered();
-  const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  const amount = formatMoneyTotals(orders, courierEarnings);
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value metric-text">${amount}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value metric-text">${formatMoneyTotals(filteredToday(), courierEarnings)}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function filteredToday() {
@@ -1177,6 +1347,478 @@ function renderCreateOrder() {
   </form></article>`;
 }
 
+function kycStatusLabel(status) {
+  return ({ pending: "En revisión", verified: "Verificado", rejected: "Rechazado" })[status] || "No verificado";
+}
+
+function applicationStatusLabel(status) {
+  return ({ pending: "Pendiente", approved: "Aprobada", rejected: "Rechazada" })[status] || status;
+}
+
+function renderCustomerService() {
+  if (state.customerKyc?.status !== "verified") {
+    return `<article class="card"><h2>Verifica tu perfil para solicitar</h2><p class="muted">Por seguridad, primero debes completar la verificación de identidad. Administración revisará las fotos antes de habilitar los servicios.</p><button class="button primary" data-screen="perfil_cliente">Ir a mi perfil</button></article>`;
+  }
+  const { pickup, destination, serviceType, mode } = state.serviceDraft;
+  const pickupLabel = pickup?.address || (pickup ? `${pickup.lat.toFixed(5)}, ${pickup.lng.toFixed(5)}` : "Selecciona la recogida en el mapa");
+  const destinationLabel = destination?.address || (destination ? `${destination.lat.toFixed(5)}, ${destination.lng.toFixed(5)}` : "Selecciona el destino en el mapa");
+  return `<p class="muted">Elige el servicio y ajusta los pines de recogida y destino. El traslado se calcula con distancia vehicular de Google Maps.</p>
+    <article class="card form-card service-form-card"><form id="customer-service-form" class="form-grid">
+      <label>Tipo de servicio<select id="service-type" name="serviceType" required>
+        <option value="traslado" ${serviceType === "traslado" ? "selected" : ""}>Traslado</option>
+        <option value="encomienda" ${serviceType === "encomienda" ? "selected" : ""}>Encomienda</option>
+        <option value="compra" ${serviceType === "compra" ? "selected" : ""}>Compra</option>
+        <option value="delivery" ${serviceType === "delivery" ? "selected" : ""}>Delivery</option>
+      </select></label>
+      <label id="transport-mode-field" class="${serviceType === "traslado" ? "" : "hidden"}">Modalidad<select id="transport-mode" name="transportMode">
+        <option value="express" ${mode === "express" ? "selected" : ""}>Express · $0,45/km</option>
+        <option value="economico" ${mode === "economico" ? "selected" : ""}>Económico · $0,35/km</option>
+      </select></label>
+      <label class="wide">Descripción del servicio<textarea name="description" required maxlength="1000" placeholder="${serviceType === "compra" ? "Indica lo que necesitas comprar y, si aplica, cantidades o preferencias." : serviceType === "encomienda" ? "Describe el paquete y cualquier indicación para retirarlo o entregarlo." : serviceType === "traslado" ? "Indica cuántas personas o qué deseas trasladar." : "Describe el pedido que deseas recibir."}"></textarea></label>
+      <div class="wide service-points">
+        <div class="section-head"><h2>Recogida</h2><span id="pickup-summary" class="muted">${escapeHtml(pickupLabel)}</span></div>
+        <label>Buscar lugar en Google Maps<input id="pickup-search" type="search" autocomplete="off" placeholder="Ej.: CC Las Américas, Maracay"></label>
+        <div id="pickup-suggestions" class="place-suggestions" role="listbox"></div>
+        <button type="button" class="button subtle small" data-action="use-current-location">Usar mi ubicación para la recogida</button>
+      </div>
+      <div class="wide service-points">
+        <div class="section-head"><h2>Destino</h2><span id="destination-summary" class="muted">${escapeHtml(destinationLabel)}</span></div>
+        <label>Buscar lugar en Google Maps<input id="destination-search" type="search" autocomplete="off" placeholder="Busca una dirección o lugar"></label>
+        <div id="destination-suggestions" class="place-suggestions" role="listbox"></div>
+      </div>
+      <div class="wide"><div class="map-point-controls"><span class="muted">Pin seleccionado para mover:</span><button type="button" class="button ${state.serviceDraft.activePoint === "pickup" ? "primary" : "subtle"} small" data-map-point="pickup">Recogida</button><button type="button" class="button ${state.serviceDraft.activePoint === "destination" ? "primary" : "subtle"} small" data-map-point="destination">Destino</button></div>
+        <div id="service-map" class="service-map" role="application" aria-label="Selecciona los puntos de recogida y destino"></div>
+        <p class="fine-print">Puedes buscar el lugar, arrastrar cada pin o seleccionar el punto activo y pulsar sobre el mapa.</p>
+      </div>
+      <div id="service-quote" class="wide quote-message">${serviceType === "traslado" && state.serviceDraft.fee !== null ? `Distancia: ${(state.serviceDraft.distanceMeters / 1000).toFixed(2)} km · Tarifa: ${formatMoney(state.serviceDraft.fee, "USD")}` : serviceType === "traslado" ? "Selecciona ambos puntos y calcula la tarifa para ver el precio." : "Soporte revisará y cotizará este servicio antes de asignarlo."}</div>
+      <div class="wide service-submit-row">
+        ${serviceType === "traslado" ? `<button type="button" class="button subtle" data-action="calculate-route">Calcular tarifa</button>` : ""}
+        <button class="button primary" type="submit">Solicitar servicio</button>
+      </div>
+    </form></article>`;
+}
+
+function renderCustomerHistory() {
+  const orders = state.orders.filter((order) => order.customer_id === state.profile.id);
+  return `<p class="muted">Solicitudes enviadas y su estado actual. Las solicitudes que requieren cotización aparecerán como pendientes hasta que soporte las revise.</p><div class="list">${renderOrderCards(orders, "customer")}</div>`;
+}
+
+function renderCustomerProfile() {
+  const kyc = state.customerKyc;
+  const verified = kyc?.status === "verified";
+  const kycForm = !verified && kyc?.status !== "pending"
+    ? `<form id="customer-kyc-form" class="stack card"><h3>Verificación KYC</h3><p class="muted">Sube una foto clara de tu rostro y una imagen legible de tu cédula. Los archivos se guardan en un espacio privado y solo tú y administración pueden consultarlos.</p>
+      <label>Foto de tu rostro<input type="file" name="selfie" accept="image/jpeg,image/png,image/webp" capture="user" required></label>
+      <label>Foto de tu cédula de identidad<input type="file" name="identityDocument" accept="image/jpeg,image/png,image/webp" capture="environment" required></label>
+      <button class="button primary">Enviar para revisión</button></form>`
+    : kyc?.status === "pending"
+      ? `<article class="card"><h3>Verificación en revisión</h3><p class="muted">Tu documentación fue enviada el ${dateTime(kyc.submitted_at)}. Te avisaremos aquí cuando administración la revise.</p></article>`
+      : kyc?.status === "rejected"
+        ? `<article class="card"><h3>Verificación rechazada</h3><p class="muted">${escapeHtml(kyc.rejection_reason || "Revisa las imágenes y vuelve a enviarlas.")}</p>${kycForm}</article>`
+        : `<article class="card"><h3>Perfil verificado</h3><p class="muted">Tu identidad fue verificada. Ya puedes solicitar servicios y postularte como motorizado o aliado comercial.</p></article>`;
+  const previousApplications = state.serviceApplications.filter((application) => application.user_id === state.profile.id);
+  const applicationForm = verified ? `<form id="service-application-form" class="form-grid card">
+    <h3 class="wide">Quiero postularme</h3>
+    <label class="wide">Tipo de postulación<select name="applicationType" id="application-type"><option value="motorizado">Motorizado</option><option value="aliado">Aliado comercial</option></select></label>
+    <div id="courier-application-fields" class="wide stack">
+      <label class="inline-checkbox"><input type="checkbox" name="availableImmediately">Disponibilidad inmediata</label>
+      <fieldset class="schedule-options"><legend>Horarios disponibles</legend><label class="inline-checkbox"><input type="checkbox" name="schedule" value="tarde">Tarde</label><label class="inline-checkbox"><input type="checkbox" name="schedule" value="noche">Noche</label><label class="inline-checkbox"><input type="checkbox" name="schedule" value="tiempo_completo">Tiempo completo</label></fieldset>
+      <label>Foto de la moto<input type="file" name="motorcyclePhoto" accept="image/jpeg,image/png,image/webp" required></label>
+      <label>Licencia de conducir<input type="file" name="driverLicense" accept="image/jpeg,image/png,image/webp" required></label>
+      <label>Certificado médico<input type="file" name="medicalCertificate" accept="image/jpeg,image/png,image/webp" required></label>
+      <label>RCV vigente<input type="file" name="rcv" accept="image/jpeg,image/png,image/webp" required></label>
+    </div>
+    <div id="ally-application-fields" class="wide form-grid hidden">
+      <label>Nombre comercial<input name="businessName" required></label><label>RIF<input name="businessTaxId" required></label>
+      <label>Tipo de negocio<input name="businessType" required></label><label>Teléfono<input name="businessPhone" value="${escapeHtml(state.profile.phone || "")}" required></label>
+      <label class="wide">Dirección comercial<input name="businessAddress" required></label>
+    </div>
+    <div class="wide"><button type="submit" class="button primary">Enviar postulación</button></div>
+  </form>` : "";
+  const applicationRows = previousApplications.map((application) => `<article class="card"><div class="order-top"><div><h3>${application.application_type === "motorizado" ? "Postulación de motorizado" : `Aliado · ${escapeHtml(application.business_name || "")}`}</h3><p class="muted">Enviada ${dateTime(application.submitted_at)}</p></div><span class="badge ${application.status === "approved" ? "green" : application.status === "rejected" ? "orange" : ""}">${applicationStatusLabel(application.status)}</span></div>${application.rejection_reason ? `<p class="muted">Motivo: ${escapeHtml(application.rejection_reason)}</p>` : ""}</article>`).join("");
+  return `<div class="grid two"><article class="card profile-card"><img id="customer-avatar" class="profile-avatar hidden" alt="Foto de perfil verificada"><div><h2>Mi perfil</h2><p><strong>${escapeHtml(state.profile.full_name)}</strong></p><p class="muted">@${escapeHtml(state.profile.username)} · ${escapeHtml(state.profile.phone || "Sin teléfono")}</p><p>Estado KYC: <span class="badge ${verified ? "green" : kyc?.status === "rejected" ? "orange" : ""}">${kycStatusLabel(kyc?.status)}</span></p></div></article>${kycForm}</div>
+    <div class="section-head"><h2>Quiero ser motorizado o aliado</h2></div>${verified ? applicationForm : `<div class="empty">Completa y aprueba tu verificación KYC para enviar una postulación.</div>`}
+    <div class="section-head"><h2>Mis postulaciones</h2></div><div class="list">${applicationRows || `<div class="empty">Aún no tienes postulaciones.</div>`}</div>`;
+}
+
+function renderKycReviews() {
+  if (!state.kycSubmissions.length) return `<div class="empty">Aún no hay verificaciones enviadas.</div>`;
+  return `<p class="muted">Los documentos son privados. Los enlaces firmados caducan en dos minutos.</p><div class="list">${state.kycSubmissions.map((item) => {
+    const user = item.profiles || {};
+    const buttons = [`<button class="button subtle small" data-action="private-file" data-bucket="customer-kyc" data-path="${escapeHtml(item.selfie_path)}">Ver rostro</button>`, `<button class="button subtle small" data-action="private-file" data-bucket="customer-kyc" data-path="${escapeHtml(item.identity_document_path)}">Ver cédula</button>`];
+    if (item.status === "pending") buttons.push(`<button class="button success small" data-action="review-kyc" data-id="${item.user_id}" data-decision="verified">Aprobar</button><button class="button danger small" data-action="review-kyc" data-id="${item.user_id}" data-decision="rejected">Rechazar</button>`);
+    return `<article class="card"><div class="order-top"><div><h3>${escapeHtml(user.full_name || "Cliente")}</h3><p>@${escapeHtml(user.username || "")} · ${escapeHtml(user.phone || "Sin teléfono")}</p><p class="muted">Enviado ${dateTime(item.submitted_at)}${item.reviewed_at ? ` · Revisado ${dateTime(item.reviewed_at)}` : ""}</p></div><span class="badge ${item.status === "verified" ? "green" : item.status === "rejected" ? "orange" : ""}">${kycStatusLabel(item.status)}</span></div>${item.rejection_reason ? `<p class="muted">Motivo: ${escapeHtml(item.rejection_reason)}</p>` : ""}<div class="order-actions">${buttons.join("")}</div></article>`;
+  }).join("")}</div>`;
+}
+
+function renderApplicationReviews() {
+  if (!state.serviceApplications.length) return `<div class="empty">Aún no hay postulaciones de motorizados o aliados.</div>`;
+  return `<p class="muted">Revisa los datos de cada aspirante y los documentos privados de las postulaciones de motorizado.</p><div class="list">${state.serviceApplications.map((item) => {
+    const user = item.profiles || {};
+    const files = item.application_type === "motorizado"
+      ? [["Foto de la moto", item.motorcycle_photo_path], ["Licencia", item.driver_license_path], ["Certificado médico", item.medical_certificate_path], ["RCV", item.rcv_path]]
+        .map(([label, path]) => `<button class="button subtle small" data-action="private-file" data-bucket="applicant-documents" data-path="${escapeHtml(path)}">${label}</button>`).join("")
+      : "";
+    const details = item.application_type === "motorizado"
+      ? `Disponibilidad: ${item.available_immediately ? "inmediata" : "por horario"} · Horarios: ${escapeHtml((item.schedules || []).join(", ") || "No indicados")}`
+      : `Comercio: ${escapeHtml(item.business_name)} · RIF: ${escapeHtml(item.business_tax_id)} · ${escapeHtml(item.business_type)} · ${escapeHtml(item.business_address)} · ${escapeHtml(item.business_phone)}`;
+    const actions = item.status === "pending"
+      ? `<button class="button success small" data-action="review-application" data-id="${item.id}" data-decision="approved">Aprobar</button><button class="button danger small" data-action="review-application" data-id="${item.id}" data-decision="rejected">Rechazar</button>`
+      : "";
+    return `<article class="card"><div class="order-top"><div><h3>${item.application_type === "motorizado" ? "Aspirante a motorizado" : "Aspirante a aliado comercial"}</h3><p>${escapeHtml(user.full_name || "Usuario")} · @${escapeHtml(user.username || "")} · ${escapeHtml(user.phone || "")}</p><p class="muted">${escapeHtml(details)}</p><p class="muted">Enviada ${dateTime(item.submitted_at)}</p></div><span class="badge ${item.status === "approved" ? "green" : item.status === "rejected" ? "orange" : ""}">${applicationStatusLabel(item.status)}</span></div>${item.rejection_reason ? `<p class="muted">Motivo: ${escapeHtml(item.rejection_reason)}</p>` : ""}<div class="order-actions">${files}${actions}</div></article>`;
+  }).join("")}</div>`;
+}
+
+function destroyServiceMap() {
+  if (state.serviceMap) state.serviceMap.remove();
+  state.serviceMap = null;
+  state.serviceMarkers = {};
+  state.serviceMapContainer = null;
+}
+
+async function initializeServiceMap() {
+  const container = document.querySelector("#service-map");
+  if (!container || state.customerKyc?.status !== "verified") return;
+  try {
+    const leaflet = await loadLeaflet();
+    if (state.screen !== "servicio" || !container.isConnected) return;
+    if (state.serviceMap && state.serviceMapContainer !== container) destroyServiceMap();
+    if (!state.serviceMap) {
+      state.serviceMapContainer = container;
+      state.serviceMap = leaflet.map(container).setView([10.2447, -67.5958], 13);
+      state.serviceMarkers = {};
+      leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
+      }).addTo(state.serviceMap);
+      state.serviceMap.on("click", (event) => {
+        updateServicePoint(state.serviceDraft.activePoint, {
+          lat: event.latlng.lat,
+          lng: event.latlng.lng,
+          address: null
+        });
+      });
+    }
+    for (const point of ["pickup", "destination"]) {
+      if (state.serviceDraft[point]) updateServiceMarker(point);
+    }
+    setTimeout(() => state.serviceMap?.invalidateSize(), 0);
+  } catch (error) {
+    console.error("No se pudo inicializar el mapa de solicitud:", error);
+    showToast(error.message || "No se pudo cargar el mapa.", true);
+  }
+}
+
+function updateServiceMarker(point) {
+  if (!state.serviceMap || !state.serviceDraft[point]) return;
+  const leaflet = window.L;
+  const location = state.serviceDraft[point];
+  if (state.serviceMarkers[point]) state.serviceMap.removeLayer(state.serviceMarkers[point]);
+  const marker = leaflet.marker([location.lat, location.lng], { draggable: true })
+    .addTo(state.serviceMap)
+    .bindTooltip(point === "pickup" ? "Recogida" : "Destino");
+  marker.on("dragend", () => {
+    const position = marker.getLatLng();
+    updateServicePoint(point, { lat: position.lat, lng: position.lng, address: null }, false);
+  });
+  state.serviceMarkers[point] = marker;
+}
+
+function updateServicePoint(point, location, centerMap = true) {
+  state.serviceDraft[point] = { lat: Number(location.lat), lng: Number(location.lng), address: location.address || null };
+  state.serviceDraft.fee = null;
+  state.serviceDraft.distanceMeters = null;
+  const summary = document.querySelector(`#${point}-summary`);
+  if (summary) summary.textContent = state.serviceDraft[point].address || `${location.lat.toFixed(5)}, ${location.lng.toFixed(5)}`;
+  if (state.serviceMap && document.querySelector("#service-map")) {
+    updateServiceMarker(point);
+    if (centerMap) state.serviceMap.flyTo([location.lat, location.lng], 16);
+  }
+  const quote = document.querySelector("#service-quote");
+  if (quote && state.serviceDraft.serviceType === "traslado") quote.textContent = "La ubicación cambió. Vuelve a calcular la tarifa.";
+}
+
+async function searchPlaces(point, query) {
+  const target = document.querySelector(`#${point}-suggestions`);
+  if (!target) return;
+  if (query.trim().length < 3) {
+    state.placeSearchResults[point] = [];
+    target.innerHTML = "";
+    return;
+  }
+  const requestedQuery = query.trim();
+  const { data, error } = await supabase.functions.invoke("customer-services", {
+    body: { action: "places", query: requestedQuery }
+  });
+  if (document.querySelector(`#${point}-search`)?.value.trim() !== requestedQuery) return;
+  if (error) {
+    target.innerHTML = `<p class="error">No se pudo buscar lugares. Comprueba la configuración de Google Maps.</p>`;
+    console.error("Error en búsqueda de Google Places:", error);
+    return;
+  }
+  const places = Array.isArray(data?.places) ? data.places : [];
+  state.placeSearchResults[point] = places;
+  target.innerHTML = places.length
+    ? places.map((place, index) => `<button type="button" class="place-option" role="option" data-place-point="${point}" data-place-index="${index}">${escapeHtml(place.description)}</button>`).join("")
+    : `<p class="muted place-empty">No se encontraron lugares.</p>`;
+  target.querySelectorAll("[data-place-point]").forEach((button) => button.addEventListener("click", () => {
+    void chooseServicePlace(button.dataset.placePoint, Number(button.dataset.placeIndex));
+  }));
+}
+
+async function chooseServicePlace(point, index) {
+  const place = state.placeSearchResults[point]?.[index];
+  if (!place?.placeId) return;
+  const { data, error } = await supabase.functions.invoke("customer-services", {
+    body: { action: "place-details", placeId: place.placeId }
+  });
+  if (error) return reportError(error);
+  if (!Number.isFinite(data?.location?.latitude) || !Number.isFinite(data?.location?.longitude)) {
+    return showToast("Google Maps no devolvió coordenadas para ese lugar.", true);
+  }
+  updateServicePoint(point, {
+    lat: data.location.latitude,
+    lng: data.location.longitude,
+    address: data.address || place.description
+  });
+  const input = document.querySelector(`#${point}-search`);
+  if (input) input.value = data.address || place.description;
+  const suggestions = document.querySelector(`#${point}-suggestions`);
+  if (suggestions) suggestions.innerHTML = "";
+}
+
+async function calculateServiceRoute() {
+  const { pickup, destination, mode } = state.serviceDraft;
+  if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
+  const { data, error } = await supabase.functions.invoke("customer-services", {
+    body: { action: "route", pickup, destination, mode }
+  });
+  if (error) return reportError(error);
+  state.serviceDraft.distanceMeters = data.distanceMeters;
+  state.serviceDraft.fee = data.fee;
+  const quote = document.querySelector("#service-quote");
+  if (quote) quote.textContent = `Distancia vehicular: ${(data.distanceMeters / 1000).toFixed(2)} km · Tarifa: ${formatMoney(data.fee, "USD")}`;
+}
+
+async function requestCustomerService(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const { pickup, destination } = state.serviceDraft;
+  if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
+  const { data: result, error } = await supabase.functions.invoke("customer-services", {
+    body: {
+      action: "create-request",
+      serviceType: data.get("serviceType"),
+      mode: data.get("serviceType") === "traslado" ? data.get("transportMode") : null,
+      description: String(data.get("description")).trim(),
+      pickup,
+      destination
+    }
+  });
+  if (error) return reportError(error);
+  state.serviceDraft.distanceMeters = result.distanceMeters ?? null;
+  state.serviceDraft.fee = result.fee ?? null;
+  showToast(data.get("serviceType") === "traslado"
+    ? `Solicitud enviada. Tarifa calculada: ${formatMoney(result.fee, "USD")}.`
+    : "Solicitud enviada; soporte la revisará y cotizará.");
+  state.screen = "historial_cliente";
+  destroyServiceMap();
+  state.serviceDraft = { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null };
+  await refreshData(false);
+  renderApp();
+}
+
+async function requestCurrentPickupLocation() {
+  if (!navigator.geolocation) return showToast("Este dispositivo no permite obtener la ubicación.", true);
+  try {
+    const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 20000,
+      maximumAge: 0
+    }));
+    updateServicePoint("pickup", {
+      lat: position.coords.latitude,
+      lng: position.coords.longitude,
+      address: "Ubicación actual (ajusta el pin si es necesario)"
+    });
+  } catch (error) {
+    showToast(error.code === 1 ? "Permite el acceso a la ubicación para usar el GPS." : "No se pudo obtener tu ubicación. Puedes fijar el punto en el mapa.", true);
+  }
+}
+
+async function uploadPrivateFile(bucket, path, file) {
+  const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
+  if (!(file instanceof File) || !allowedTypes.includes(file.type) || file.size > 10 * 1024 * 1024) {
+    throw new Error("Usa una imagen JPG, PNG o WebP de máximo 10 MB.");
+  }
+  const { error } = await supabase.storage.from(bucket).upload(path, file, {
+    cacheControl: "0",
+    contentType: file.type,
+    upsert: false
+  });
+  if (error) throw error;
+}
+
+function privateFilePath(folder, file) {
+  if (!(file instanceof File)) throw new Error("Selecciona todos los documentos requeridos.");
+  const extension = ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" })[file.type];
+  return `${state.profile.id}/${folder ? `${folder}/` : ""}${crypto.randomUUID()}.${extension || "img"}`;
+}
+
+async function submitCustomerKyc(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const selfie = data.get("selfie");
+  const document = data.get("identityDocument");
+  const previousPaths = state.customerKyc?.status === "rejected"
+    ? [state.customerKyc.selfie_path, state.customerKyc.identity_document_path]
+    : [];
+  const paths = [];
+  let submitted = false;
+  try {
+    for (const file of [selfie, document]) {
+      const path = privateFilePath("", file);
+      await uploadPrivateFile("customer-kyc", path, file);
+      paths.push(path);
+    }
+    const { error } = await supabase.rpc("submit_customer_kyc", {
+      p_selfie_path: paths[0],
+      p_document_path: paths[1]
+    });
+    if (error) throw error;
+    submitted = true;
+    showToast("Documentos enviados de forma privada para revisión.");
+    if (previousPaths.length) {
+      const { error: cleanupError } = await supabase.storage.from("customer-kyc").remove(previousPaths);
+      if (cleanupError) reportError(new Error(`Se envió la nueva verificación, pero no se pudieron eliminar las fotos anteriores: ${cleanupError.message}`));
+    }
+    await refreshData(false);
+    renderApp();
+  } catch (error) {
+    if (paths.length && !submitted) {
+      const { error: cleanupError } = await supabase.storage.from("customer-kyc").remove(paths);
+      if (cleanupError) console.error("No se pudieron limpiar archivos KYC sin registro:", cleanupError);
+    }
+    reportError(error);
+  }
+}
+
+function updateApplicationFormFields() {
+  const type = document.querySelector("#application-type")?.value;
+  const courierFields = document.querySelector("#courier-application-fields");
+  const allyFields = document.querySelector("#ally-application-fields");
+  if (!courierFields || !allyFields) return;
+  courierFields.classList.toggle("hidden", type !== "motorizado");
+  allyFields.classList.toggle("hidden", type !== "aliado");
+  courierFields.querySelectorAll("input[required]").forEach((field) => { field.required = type === "motorizado"; });
+  allyFields.querySelectorAll("input[required]").forEach((field) => { field.required = type === "aliado"; });
+}
+
+async function submitServiceApplication(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const applicationId = crypto.randomUUID();
+  const type = String(data.get("applicationType"));
+  const paths = [];
+  let submitted = false;
+  try {
+    const pathFor = async (fieldName) => {
+      const file = data.get(fieldName);
+      const path = privateFilePath(applicationId, file);
+      await uploadPrivateFile("applicant-documents", path, file);
+      paths.push(path);
+      return path;
+    };
+    const parameters = {
+      p_application_id: applicationId,
+      p_type: type,
+      p_available_immediately: data.has("availableImmediately"),
+      p_schedules: data.getAll("schedule"),
+      p_business_name: data.get("businessName") || null,
+      p_business_tax_id: data.get("businessTaxId") || null,
+      p_business_type: data.get("businessType") || null,
+      p_business_address: data.get("businessAddress") || null,
+      p_business_phone: data.get("businessPhone") || null
+    };
+    if (type === "motorizado") {
+      parameters.p_motorcycle_photo_path = await pathFor("motorcyclePhoto");
+      parameters.p_driver_license_path = await pathFor("driverLicense");
+      parameters.p_medical_certificate_path = await pathFor("medicalCertificate");
+      parameters.p_rcv_path = await pathFor("rcv");
+    }
+    const { error } = await supabase.rpc("submit_service_application", parameters);
+    if (error) throw error;
+    submitted = true;
+    showToast("Postulación enviada a administración.");
+    await refreshData(false);
+    renderApp();
+  } catch (error) {
+    if (paths.length && !submitted) {
+      const { error: cleanupError } = await supabase.storage.from("applicant-documents").remove(paths);
+      if (cleanupError) console.error("No se pudieron limpiar archivos de postulación sin registro:", cleanupError);
+    }
+    reportError(error);
+  }
+}
+
+async function openPrivateFile(button) {
+  const popup = window.open("about:blank", "_blank");
+  if (!popup) return showToast("Permite las ventanas emergentes para ver el documento privado.", true);
+  popup.opener = null;
+  const { data, error } = await supabase.storage.from(button.dataset.bucket).createSignedUrl(button.dataset.path, 120);
+  if (error) {
+    popup.close();
+    return reportError(error);
+  }
+  popup.location.href = data.signedUrl;
+}
+
+async function loadCustomerAvatar() {
+  const image = document.querySelector("#customer-avatar");
+  if (!image || !state.profile?.avatar_path) return;
+  const { data, error } = await supabase.storage.from("customer-kyc").createSignedUrl(state.profile.avatar_path, 300);
+  if (error) {
+    console.error("No se pudo cargar la foto privada del perfil:", error);
+    return;
+  }
+  image.src = data.signedUrl;
+  image.classList.remove("hidden");
+}
+
+async function reviewKyc(button) {
+  let reason = null;
+  if (button.dataset.decision === "rejected") {
+    reason = window.prompt("Indica el motivo del rechazo:");
+    if (!reason?.trim()) return showToast("Debes indicar el motivo del rechazo.", true);
+  }
+  const { error } = await supabase.rpc("review_customer_kyc", {
+    p_user_id: button.dataset.id,
+    p_decision: button.dataset.decision,
+    p_reason: reason
+  });
+  if (error) return reportError(error);
+  showToast(button.dataset.decision === "verified" ? "Perfil verificado." : "Verificación rechazada.");
+  await refreshData(false);
+  renderApp();
+}
+
+async function reviewApplication(button) {
+  let reason = null;
+  if (button.dataset.decision === "rejected") {
+    reason = window.prompt("Indica el motivo del rechazo:");
+    if (!reason?.trim()) return showToast("Debes indicar el motivo del rechazo.", true);
+  }
+  const { error } = await supabase.rpc("review_service_application", {
+    p_application_id: button.dataset.id,
+    p_decision: button.dataset.decision,
+    p_reason: reason
+  });
+  if (error) return reportError(error);
+  showToast(button.dataset.decision === "approved" ? "Postulación aprobada y rol asignado." : "Postulación rechazada.");
+  await refreshData(false);
+  renderApp();
+}
+
 function renderAllies() {
   const isAdmin = state.profile.role === "administracion";
   return `<div class="section-head"><h2>Aliados comerciales</h2></div>${isAdmin ? `<form id="ally-form" class="form-grid card"><label>Nombre del aliado<input name="name" required></label><label>Ubicación GPS del comercio (URL)<input name="locationUrl" type="url" placeholder="https://maps.google.com/..."></label><div class="wide"><button class="button primary">Agregar aliado</button></div></form>` : ""}
@@ -1191,7 +1833,7 @@ function renderUsers() {
     return matchesRole && matchesSearch;
   });
   const roleTabs = [
-    ["all", "Todos"], ["motorizado", "Motorizados"], ["aliado", "Aliados"],
+    ["all", "Todos"], ["cliente", "Clientes"], ["motorizado", "Motorizados"], ["aliado", "Aliados"],
     ["soporte", "Soporte"], ["administracion", "Administración"]
   ];
   const rows = visibleProfiles.map((profile) => `<tr><td>@${escapeHtml(profile.username)}</td><td><input aria-label="Nombre completo" data-profile-name="${profile.id}" value="${escapeHtml(profile.full_name)}"><input aria-label="Teléfono" data-profile-phone="${profile.id}" value="${escapeHtml(profile.phone || "")}" style="margin-top:6px"></td><td><select data-action="role" data-id="${profile.id}"><option value="">Sin rol</option>${Object.entries(roleNames).map(([value, label]) => `<option value="${value}" ${profile.role === value ? "selected" : ""}>${label}</option>`).join("")}</select>${profile.role === "motorizado" ? `<label class="muted">Porcentaje de ganancia <input type="number" min="0" max="100" step="1" data-profile-percentage="${profile.id}" value="${Number(profile.earnings_percentage ?? 70)}">%</label>` : ""}</td><td><select aria-label="Aliado del usuario" data-profile-ally="${profile.id}"><option value="">Sin aliado</option>${state.allies.map((ally) => `<option value="${ally.id}" ${profile.ally_id === ally.id ? "selected" : ""}>${escapeHtml(ally.name)}</option>`).join("")}</select></td><td>${profile.suspended ? `<span class="badge">Suspendido</span>` : profile.approved ? `<span class="badge green">${profile.online ? "Activo" : "Aprobado"}</span>` : `<span class="badge orange">Pendiente</span>`}</td><td class="user-actions"><button class="button subtle small" data-action="save-profile" data-id="${profile.id}">Guardar</button><button class="button ${profile.suspended ? "success" : "danger"} small" data-action="suspend" data-id="${profile.id}" data-suspended="${profile.suspended}">${profile.suspended ? "Reactivar" : "Suspender"}</button><button class="button danger small" data-action="delete-user" data-id="${profile.id}">Eliminar</button></td></tr>`).join("");
@@ -1205,7 +1847,7 @@ function renderReports() {
   const todayDelivered = delivered.filter((order) => new Date(order.delivered_at) >= dayStart());
   const createdToday = state.orders.filter((order) => new Date(order.created_at) >= dayStart());
   const couriers = state.profiles.filter((profile) => profile.role === "motorizado");
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${todayDelivered.length} entregados</span></article><article class="card"><span class="metric-label">Delivery generado hoy</span><div class="metric-value">${formatMoney(todayDelivered.reduce((sum, order) => sum + Number(order.delivery_fee), 0))}</div></article><article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${countOnline()}</div></article></div>
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos creados hoy</span><div class="metric-value">${createdToday.length}</div><span class="metric-foot">${todayDelivered.length} entregados</span></article><article class="card"><span class="metric-label">Delivery generado hoy</span><div class="metric-value metric-text">${formatMoneyTotals(todayDelivered, (order) => order.delivery_fee)}</div></article><article class="card"><span class="metric-label">Motorizados activos</span><div class="metric-value">${countOnline()}</div></article></div>
     <div class="section-head"><h2>Reportes de entregas</h2></div><div class="toolbar">
       <label>Desde<input type="date" id="report-from"></label>
       <label>Hasta<input type="date" id="report-to"></label>
@@ -1290,7 +1932,7 @@ function renderMetrics() {
 }
 
 function reportTable(orders) {
-  return `<table><thead><tr><th>Aliado</th><th>Cliente</th><th>Dirección</th><th>Motorizado</th><th>Creado por</th><th>Hora comercio</th><th>Hora entrega</th><th>Fecha</th><th>Delivery</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escapeHtml(order.allies?.name)}</td><td>${escapeHtml(order.client_name)}</td><td>${escapeHtml(order.address)}</td><td>${escapeHtml(order.courier?.full_name || order.courier_name || "")}</td><td>${escapeHtml(order.creator?.full_name || order.creator_name || "—")}</td><td>${dateTime(order.at_store_at)}</td><td>${dateTime(order.delivered_at)}</td><td>${new Date(order.delivered_at).toLocaleDateString("es-CO")}</td><td>${formatMoney(order.delivery_fee)}</td></tr>`).join("") : `<tr><td colspan="9">Sin pedidos para el periodo seleccionado.</td></tr>`}</tbody></table>`;
+  return `<table><thead><tr><th>Aliado / servicio</th><th>Cliente</th><th>Dirección / destino</th><th>Motorizado</th><th>Creado por</th><th>Hora comercio</th><th>Hora entrega</th><th>Fecha</th><th>Delivery</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escapeHtml(order.allies?.name || order.service_type || "—")}</td><td>${escapeHtml(order.client_name)}</td><td>${escapeHtml(order.destination_address || order.address || "—")}</td><td>${escapeHtml(order.courier?.full_name || order.courier_name || "")}</td><td>${escapeHtml(order.creator?.full_name || order.creator_name || "—")}</td><td>${dateTime(order.at_store_at)}</td><td>${dateTime(order.delivered_at)}</td><td>${new Date(order.delivered_at).toLocaleDateString("es-CO")}</td><td>${formatMoney(order.delivery_fee, order.currency)}</td></tr>`).join("") : `<tr><td colspan="9">Sin pedidos para el periodo seleccionado.</td></tr>`}</tbody></table>`;
 }
 
 function reportOrders() {
@@ -1310,6 +1952,68 @@ function reportOrders() {
 function bindScreenActions() {
   const createForm = document.querySelector("#create-order");
   if (createForm) createForm.addEventListener("submit", createOrder);
+  const serviceForm = document.querySelector("#customer-service-form");
+  if (serviceForm) serviceForm.addEventListener("submit", requestCustomerService);
+  const serviceType = document.querySelector("#service-type");
+  if (serviceType) serviceType.addEventListener("change", () => {
+    state.serviceDraft.serviceType = serviceType.value;
+    state.serviceDraft.fee = null;
+    state.serviceDraft.distanceMeters = null;
+    document.querySelector("#transport-mode-field")?.classList.toggle("hidden", serviceType.value !== "traslado");
+    const calculateButton = document.querySelector('[data-action="calculate-route"]');
+    if (calculateButton) calculateButton.classList.toggle("hidden", serviceType.value !== "traslado");
+    const quote = document.querySelector("#service-quote");
+    if (quote) quote.textContent = serviceType.value === "traslado"
+      ? "Selecciona ambos puntos y calcula la tarifa para ver el precio."
+      : "Soporte revisará y cotizará este servicio antes de asignarlo.";
+    const description = document.querySelector('#customer-service-form textarea[name="description"]');
+    if (description) description.placeholder = serviceType.value === "compra"
+      ? "Indica lo que necesitas comprar y, si aplica, cantidades o preferencias."
+      : serviceType.value === "encomienda"
+        ? "Describe el paquete y cualquier indicación para retirarlo o entregarlo."
+        : serviceType.value === "traslado"
+          ? "Indica cuántas personas o qué deseas trasladar."
+          : "Describe el pedido que deseas recibir.";
+  });
+  const transportMode = document.querySelector("#transport-mode");
+  if (transportMode) transportMode.addEventListener("change", () => {
+    state.serviceDraft.mode = transportMode.value;
+    state.serviceDraft.fee = null;
+    state.serviceDraft.distanceMeters = null;
+    const quote = document.querySelector("#service-quote");
+    if (quote) quote.textContent = "La modalidad cambió. Vuelve a calcular la tarifa.";
+  });
+  for (const point of ["pickup", "destination"]) {
+    const search = document.querySelector(`#${point}-search`);
+    if (search) search.addEventListener("input", () => {
+      clearTimeout(state.placeSearchTimers[point]);
+      state.placeSearchTimers[point] = setTimeout(() => searchPlaces(point, search.value), 350);
+    });
+  }
+  document.querySelectorAll("[data-map-point]").forEach((button) => button.addEventListener("click", () => {
+    state.serviceDraft.activePoint = button.dataset.mapPoint;
+    document.querySelectorAll("[data-map-point]").forEach((item) => item.classList.toggle("primary", item === button));
+    document.querySelectorAll("[data-map-point]").forEach((item) => item.classList.toggle("subtle", item !== button));
+  }));
+  document.querySelectorAll("[data-place-point]").forEach((button) => button.addEventListener("click", () => {
+    void chooseServicePlace(button.dataset.placePoint, Number(button.dataset.placeIndex));
+  }));
+  document.querySelector('[data-action="use-current-location"]')?.addEventListener("click", requestCurrentPickupLocation);
+  document.querySelector('[data-action="calculate-route"]')?.addEventListener("click", calculateServiceRoute);
+  const kycForm = document.querySelector("#customer-kyc-form");
+  if (kycForm) kycForm.addEventListener("submit", submitCustomerKyc);
+  const applicationForm = document.querySelector("#service-application-form");
+  if (applicationForm) {
+    const applicationType = document.querySelector("#application-type");
+    applicationType.addEventListener("change", () => {
+      updateApplicationFormFields();
+      const alreadyPending = state.serviceApplications.some((item) => item.status === "pending" && item.application_type === applicationType.value);
+      applicationForm.querySelector('button[type="submit"]').disabled = alreadyPending;
+    });
+    updateApplicationFormFields();
+    applicationForm.querySelector('button[type="submit"]').disabled = state.serviceApplications.some((item) => item.status === "pending" && item.application_type === applicationType.value);
+    applicationForm.addEventListener("submit", submitServiceApplication);
+  }
   const assignCourierToggle = document.querySelector("#assign-courier-toggle");
   if (assignCourierToggle) assignCourierToggle.addEventListener("change", () => {
     const courierField = document.querySelector("#assigned-courier-field");
@@ -1347,8 +2051,8 @@ function bindScreenActions() {
 }
 
 function deliveredSummaryFor(orders) {
-  const amount = orders.reduce((sum, order) => sum + courierEarnings(order), 0);
-  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value">${formatMoney(amount)}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value">${formatMoney(filteredToday().reduce((sum, order) => sum + courierEarnings(order), 0))}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
+  const amount = formatMoneyTotals(orders, courierEarnings);
+  return `<div class="grid metrics"><article class="card"><span class="metric-label">Pedidos en el periodo</span><div class="metric-value">${orders.length}</div></article><article class="card"><span class="metric-label">Ganancia (${courierEarningsPercentage()}%)</span><div class="metric-value metric-text">${amount}</div></article><article class="card"><span class="metric-label">Ganancia de hoy</span><div class="metric-value metric-text">${formatMoneyTotals(filteredToday(), courierEarnings)}</div></article></div><div class="section-head"><h2>Historial de entregas</h2></div><div class="list">${renderOrderCards(orders, "completed")}</div>`;
 }
 
 function bindOrderActions() {
@@ -1369,6 +2073,25 @@ function bindOrderActions() {
   }));
   document.querySelectorAll('[data-action="release"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "release_order")));
   document.querySelectorAll('[data-action="cancel-order"]').forEach((button) => button.addEventListener("click", () => cancelOrder(button.dataset.id)));
+  document.querySelectorAll('[data-action="quote-service"]').forEach((button) => button.addEventListener("click", async () => {
+    const rawFee = window.prompt("Ingresa el costo del delivery en USD:");
+    if (rawFee === null) return;
+    const fee = Number(rawFee.replace(",", "."));
+    if (!Number.isFinite(fee) || fee < 0) return showToast("Ingresa un precio válido en USD.", true);
+    const courierId = document.querySelector(`[data-quote-courier="${button.dataset.id}"]`)?.value || null;
+    const { error } = await supabase.rpc("quote_customer_service_order", {
+      p_order_id: button.dataset.id,
+      p_delivery_fee: fee,
+      p_courier_id: courierId
+    });
+    if (error) return reportError(error);
+    showToast(courierId ? "Servicio cotizado y asignado al motorizado activo." : "Servicio cotizado y liberado para motorizados activos.");
+    await refreshData(false);
+    renderApp();
+  }));
+  document.querySelectorAll('[data-action="private-file"]').forEach((button) => button.addEventListener("click", () => openPrivateFile(button)));
+  document.querySelectorAll('[data-action="review-kyc"]').forEach((button) => button.addEventListener("click", () => reviewKyc(button)));
+  document.querySelectorAll('[data-action="review-application"]').forEach((button) => button.addEventListener("click", () => reviewApplication(button)));
   document.querySelectorAll('[data-action="reassign"]').forEach((button) => button.addEventListener("click", () => {
     const select = document.querySelector(`[data-reassign-select="${button.dataset.id}"]`);
     if (!select?.value) return showToast("Selecciona el motorizado que recibirá el pedido.", true);
@@ -1477,10 +2200,10 @@ async function deleteAlly(id) {
 
 async function deleteUser(id) {
   if (id === state.profile.id) return showToast("No puedes eliminar tu propia cuenta de administración.", true);
-  if (!window.confirm("¿Eliminar el acceso de este usuario? Los pedidos realizados permanecerán en el historial.")) return;
-  const { error } = await supabase.rpc("delete_user_account", { target_user: id });
+  if (!window.confirm("¿Eliminar esta cuenta y sus documentos privados? Los pedidos realizados permanecerán en el historial.")) return;
+  const { error } = await supabase.functions.invoke("admin-delete-user", { body: { userId: id } });
   if (error) return reportError(error);
-  showToast("Cuenta eliminada; se conservó el historial de pedidos.");
+  showToast("Cuenta y documentos privados eliminados; se conservó el historial de pedidos.");
   await refreshData(false);
   renderApp();
 }
@@ -1528,7 +2251,7 @@ async function updateProfile(id, changes) {
 
 function exportReport() {
   const columns = [
-    ["Aliado", (order) => order.allies?.name || ""],
+    ["Aliado / servicio", (order) => order.allies?.name || order.service_type || ""],
     ["Cliente", (order) => order.client_name],
     ["Descripción", (order) => order.description || ""],
     ["Direccion", (order) => order.address],
@@ -1537,7 +2260,8 @@ function exportReport() {
     ["Hora llegada comercio", (order) => order.at_store_at ? new Date(order.at_store_at).toLocaleTimeString("es-CO") : ""],
     ["Hora entrega", (order) => order.delivered_at ? new Date(order.delivered_at).toLocaleTimeString("es-CO") : ""],
     ["Fecha", (order) => order.delivered_at ? new Date(order.delivered_at).toLocaleDateString("es-CO") : ""],
-    ["Costo delivery", (order) => order.delivery_fee]
+    ["Costo delivery", (order) => order.delivery_fee],
+    ["Moneda", (order) => order.currency || "COP"]
   ];
   const xmlEscape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]);
   const rows = [
@@ -1553,12 +2277,22 @@ function exportReport() {
 }
 
 async function signOut() {
+  if (state.profile?.role === "motorizado" && state.pushToken) {
+    const { error: pushError } = await supabase.rpc("unregister_courier_push_token", { p_token: state.pushToken });
+    if (pushError) console.error("No se pudo quitar el token push de esta cuenta:", pushError);
+    state.pushToken = null;
+  }
   if (state.profile?.role === "motorizado" && state.profile.online) {
     stopCourierLocationTracking();
     const { error: availabilityError } = await supabase.rpc("set_courier_online", { is_online: false });
     if (availabilityError) console.error("No se pudo cerrar la disponibilidad antes de salir:", availabilityError);
   }
   stopCourierLocationTracking();
+  destroyServiceMap();
+  state.customerKyc = null;
+  state.kycSubmissions = [];
+  state.serviceApplications = [];
+  state.serviceDraft = { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null };
   if (state.realtime) {
     await supabase.removeChannel(state.realtime);
     state.realtime = null;

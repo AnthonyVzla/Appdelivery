@@ -88,6 +88,22 @@ textarea { min-height: 82px; resize: vertical; }
 .toolbar label { min-width: 155px; }
 .list { display: grid; gap: 12px; }
 .monitoring-map { width: 100%; min-height: 360px; margin: 14px 0 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #232129; }
+.service-map { width: 100%; min-height: 390px; margin: 10px 0 6px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #232129; }
+.service-points { display: grid; gap: 10px; }
+.service-points .section-head { margin: 5px 0 0; align-items: flex-start; }
+.service-points .section-head h2 { font-size: 16px; }
+.service-points .section-head .muted { max-width: 62%; text-align: right; overflow-wrap: anywhere; font-size: 12px; }
+.place-suggestions { display: grid; gap: 5px; }
+.place-option { width: 100%; padding: 10px 12px; text-align: left; color: #eeeaf2; border: 1px solid var(--line); border-radius: 9px; background: #201e25; }
+.place-option:hover { border-color: var(--pink); }
+.place-empty { margin: 0; font-size: 12px; }
+.map-point-controls, .service-submit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.quote-message { padding: 12px; border: 1px solid #554064; border-radius: 10px; color: #e8c8ed; background: #241a2d; font-size: 13px; }
+.profile-card { display: flex; align-items: center; gap: 16px; }
+.profile-avatar { width: 82px; height: 82px; flex: 0 0 82px; object-fit: cover; border: 2px solid var(--purple); border-radius: 50%; }
+.schedule-options { display: flex; flex-wrap: wrap; gap: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.schedule-options legend { padding: 0 7px; color: var(--muted); font-size: 12px; }
+.schedule-options .inline-checkbox { align-items: center; }
 .leaflet-tooltip.courier-map-label { padding: 4px 8px; border: 1px solid #8d54ef; border-radius: 7px; color: #fff; background: #17141deF; box-shadow: 0 2px 8px #0009; font: 700 12px/1.25 "DM Sans", sans-serif; white-space: nowrap; }
 .leaflet-tooltip-top.courier-map-label::before { border-top-color: #8d54ef; }
 .monitoring-courier { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
@@ -161,5 +177,7 @@ tr:last-child td { border-bottom: 0; }
   .section-head { align-items: flex-start; }
   .audio-activation { align-items: stretch; flex-direction: column; }
   .monitoring-map { min-height: 300px; }
+  .service-map { min-height: 320px; }
   .monitoring-courier { align-items: flex-start; }
+  .profile-card { align-items: flex-start; }
 }

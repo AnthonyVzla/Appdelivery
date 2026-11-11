@@ -18,7 +18,7 @@ PWA de gestión de pedidos para motorizados, aliados, soporte y administración.
 
 ## Configuración de Supabase
 
-1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`. Vuelve a ejecutarlo para aplicar el rol cliente, KYC, solicitudes, políticas de Storage y las funciones de revisión; el esquema está preparado para volver a ejecutarse.
+1. En el proyecto `ibclzcikkxhdnorcbfoe`, abre **SQL Editor** y ejecuta `supabase/schema.sql`. Vuelve a ejecutarlo para aplicar el rol cliente, KYC, solicitudes, políticas de Storage y las funciones de revisión; el esquema está preparado para volver a ejecutarse. La política de pedidos usa una función segura para comprobar pedidos en curso y evitar recursión de RLS.
 2. En **Authentication → Providers → Email**, desactiva **Confirm email** antes de registrar usuarios. La interfaz pide usuario y contraseña, no correo: internamente utiliza un alias técnico `usuario@users.aunpaso.local` para el proveedor de contraseña de Supabase.
 3. Registra la cuenta que será la primera administradora. En SQL Editor, asígnale el rol:
 

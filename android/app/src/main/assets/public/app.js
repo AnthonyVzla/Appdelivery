@@ -120,8 +120,10 @@ function checkServiceWorkerUpdate() {
 }
 
 function hasUnsavedFormData() {
-  return [...app.querySelectorAll("form input:not([type=checkbox]):not([type=radio]):not([type=file]), form textarea")]
-    .some((field) => field.value.trim() !== "");
+  const textFields = [...app.querySelectorAll("form input:not([type=checkbox]):not([type=radio]):not([type=file]), form textarea")];
+  const fileFields = [...app.querySelectorAll("form input[type=file]")];
+  return textFields.some((field) => field.value.trim() !== "")
+    || fileFields.some((field) => field.files.length > 0);
 }
 
 function reloadForServiceWorkerUpdate() {

@@ -58,6 +58,35 @@ function reportError(error) {
   showToast(error.message || "Ocurrió un error. Intenta nuevamente.", true);
 }
 
+async function invokeCustomerServices(body) {
+  const { data, error } = await supabase.functions.invoke("customer-services", { body });
+  if (!error) return { data, error: null };
+
+  if (error.context instanceof Response) {
+    let detail = "";
+    try {
+      const responseBody = await error.context.clone().json();
+      if (typeof responseBody?.error === "string") detail = responseBody.error;
+    } catch {
+      // The response may not contain JSON.
+    }
+    const message = detail || (error.context.status === 404
+      ? "No se encontró customer-services. Despliega la función en Supabase antes de usar el mapa."
+      : `customer-services respondió HTTP ${error.context.status}.`);
+    return { data: null, error: new Error(message) };
+  }
+
+  if (error.name === "FunctionsFetchError") {
+    const cause = error.context instanceof Error ? ` (${error.context.message})` : "";
+    return {
+      data: null,
+      error: new Error(`No se pudo conectar con customer-services. Verifica que esté desplegada y que la conexión permita la solicitud.${cause}`)
+    };
+  }
+
+  return { data: null, error: new Error(error.message || "No se pudo completar la solicitud al servicio de mapas.") };
+}
+
 function usernameEmail(username) {
   return `${username.trim().toLowerCase()}@users.aunpaso.local`;
 }
@@ -1504,7 +1533,10 @@ async function initializeServiceMap() {
     for (const point of ["pickup", "destination"]) {
       if (state.serviceDraft[point]) updateServiceMarker(point);
     }
-    setTimeout(() => state.serviceMap?.invalidateSize(), 0);
+    setTimeout(() => {
+      state.serviceMap?.invalidateSize();
+      fitServiceMapToPoints();
+    }, 0);
   } catch (error) {
     console.error("No se pudo inicializar el mapa de solicitud:", error);
     showToast(error.message || "No se pudo cargar el mapa.", true);
@@ -1526,6 +1558,16 @@ function updateServiceMarker(point) {
   state.serviceMarkers[point] = marker;
 }
 
+function fitServiceMapToPoints() {
+  const { pickup, destination } = state.serviceDraft;
+  if (!state.serviceMap || !pickup || !destination) return false;
+  state.serviceMap.fitBounds([
+    [pickup.lat, pickup.lng],
+    [destination.lat, destination.lng]
+  ], { padding: [40, 40], maxZoom: 16 });
+  return true;
+}
+
 function updateServicePoint(point, location, centerMap = true) {
   state.serviceDraft[point] = { lat: Number(location.lat), lng: Number(location.lng), address: location.address || null };
   state.serviceDraft.fee = null;
@@ -1534,7 +1576,7 @@ function updateServicePoint(point, location, centerMap = true) {
   if (summary) summary.textContent = state.serviceDraft[point].address || `${location.lat.toFixed(5)}, ${location.lng.toFixed(5)}`;
   if (state.serviceMap && document.querySelector("#service-map")) {
     updateServiceMarker(point);
-    if (centerMap) state.serviceMap.flyTo([location.lat, location.lng], 16);
+    if (!fitServiceMapToPoints() && centerMap) state.serviceMap.flyTo([location.lat, location.lng], 16);
   }
   const quote = document.querySelector("#service-quote");
   if (quote && state.serviceDraft.serviceType === "traslado") quote.textContent = "La ubicación cambió. Vuelve a calcular la tarifa.";
@@ -1549,12 +1591,10 @@ async function searchPlaces(point, query) {
     return;
   }
   const requestedQuery = query.trim();
-  const { data, error } = await supabase.functions.invoke("customer-services", {
-    body: { action: "places", query: requestedQuery }
-  });
+  const { data, error } = await invokeCustomerServices({ action: "places", query: requestedQuery });
   if (document.querySelector(`#${point}-search`)?.value.trim() !== requestedQuery) return;
   if (error) {
-    target.innerHTML = `<p class="error">No se pudo buscar lugares. Comprueba la configuración de Google Maps.</p>`;
+    target.innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
     console.error("Error en búsqueda de Google Places:", error);
     return;
   }
@@ -1571,9 +1611,7 @@ async function searchPlaces(point, query) {
 async function chooseServicePlace(point, index) {
   const place = state.placeSearchResults[point]?.[index];
   if (!place?.placeId) return;
-  const { data, error } = await supabase.functions.invoke("customer-services", {
-    body: { action: "place-details", placeId: place.placeId }
-  });
+  const { data, error } = await invokeCustomerServices({ action: "place-details", placeId: place.placeId });
   if (error) return reportError(error);
   if (!Number.isFinite(data?.location?.latitude) || !Number.isFinite(data?.location?.longitude)) {
     return showToast("Google Maps no devolvió coordenadas para ese lugar.", true);
@@ -1592,9 +1630,7 @@ async function chooseServicePlace(point, index) {
 async function calculateServiceRoute() {
   const { pickup, destination, mode } = state.serviceDraft;
   if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
-  const { data, error } = await supabase.functions.invoke("customer-services", {
-    body: { action: "route", pickup, destination, mode }
-  });
+  const { data, error } = await invokeCustomerServices({ action: "route", pickup, destination, mode });
   if (error) return reportError(error);
   state.serviceDraft.distanceMeters = data.distanceMeters;
   state.serviceDraft.fee = data.fee;
@@ -1607,15 +1643,13 @@ async function requestCustomerService(event) {
   const data = new FormData(event.currentTarget);
   const { pickup, destination } = state.serviceDraft;
   if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
-  const { data: result, error } = await supabase.functions.invoke("customer-services", {
-    body: {
-      action: "create-request",
-      serviceType: data.get("serviceType"),
-      mode: data.get("serviceType") === "traslado" ? data.get("transportMode") : null,
-      description: String(data.get("description")).trim(),
-      pickup,
-      destination
-    }
+  const { data: result, error } = await invokeCustomerServices({
+    action: "create-request",
+    serviceType: data.get("serviceType"),
+    mode: data.get("serviceType") === "traslado" ? data.get("transportMode") : null,
+    description: String(data.get("description")).trim(),
+    pickup,
+    destination
   });
   if (error) return reportError(error);
   state.serviceDraft.distanceMeters = result.distanceMeters ?? null;
@@ -1996,6 +2030,10 @@ function bindScreenActions() {
     state.serviceDraft.activePoint = button.dataset.mapPoint;
     document.querySelectorAll("[data-map-point]").forEach((item) => item.classList.toggle("primary", item === button));
     document.querySelectorAll("[data-map-point]").forEach((item) => item.classList.toggle("subtle", item !== button));
+    if (!fitServiceMapToPoints()) {
+      const location = state.serviceDraft[state.serviceDraft.activePoint];
+      if (location) state.serviceMap?.flyTo([location.lat, location.lng], 16);
+    }
   }));
   document.querySelectorAll("[data-place-point]").forEach((button) => button.addEventListener("click", () => {
     void chooseServicePlace(button.dataset.placePoint, Number(button.dataset.placeIndex));

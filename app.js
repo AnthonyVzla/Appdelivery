@@ -7,7 +7,7 @@ const app = document.querySelector("#app");
 const toastNode = document.querySelector("#toast");
 const roleNames = { motorizado: "Motorizado", soporte: "Soporte", administracion: "Administración", aliado: "Aliado", cliente: "Cliente" };
 const statusNames = { pending: "Disponible", assigned: "Asignado", at_store: "En el comercio", in_transit: "En camino", delivered: "Entregado", cancelled: "Cancelado" };
-const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], customerKyc: null, kycSubmissions: [], serviceApplications: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, serviceMap: null, serviceMarkers: {}, serviceMapContainer: null, serviceDraft: { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null }, placeSearchTimers: {}, placeSearchResults: { pickup: [], destination: [] }, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map(), pushToken: null, pushListenersReady: false, pushRegistrationResolve: null };
+const state = { session: null, profile: null, screen: "inicio", orders: [], allies: [], profiles: [], courierLocations: [], customerKyc: null, kycSubmissions: [], serviceApplications: [], period: "day", usersRole: "all", usersSearch: "", authMode: "login", toastTimer: null, refreshTimer: null, updateCheckTimer: null, locationRefreshTimer: null, overdueTimer: null, realtime: null, serviceWorkerRegistration: null, updatePending: false, reloadingForUpdate: false, alertsEnabled: false, overdueSoundsEnabled: false, alertAudio: {}, courierLocationWatchId: null, nativeBackgroundLocationWatcherId: null, courierLocationWritePending: false, lastCourierLocationSentAt: 0, latestCourierPosition: null, courierWakeLock: null, courierLocationError: "", monitoringLocationLoadError: false, leafletPromise: null, monitoringMap: null, monitoringMarkers: null, monitoringMapContainer: null, monitoringMapDidFit: false, serviceMap: null, serviceMarkers: {}, serviceMapContainer: null, serviceDraft: { pickup: null, destination: null, activePoint: "pickup", mode: "express", serviceType: "traslado", distanceMeters: null, fee: null }, placeSearchTimers: {}, placeSearchResults: { pickup: [], destination: [] }, lastGeocodeRequestAt: 0, notifiedOrders: new Set(), courierAlarms: new Map(), overdueAlarmTimes: new Map(), pushToken: null, pushListenersReady: false, pushRegistrationResolve: null };
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
@@ -56,35 +56,6 @@ function showToast(message, isError = false) {
 function reportError(error) {
   console.error(error);
   showToast(error.message || "Ocurrió un error. Intenta nuevamente.", true);
-}
-
-async function invokeCustomerServices(body) {
-  const { data, error } = await supabase.functions.invoke("customer-services", { body });
-  if (!error) return { data, error: null };
-
-  if (error.context instanceof Response) {
-    let detail = "";
-    try {
-      const responseBody = await error.context.clone().json();
-      if (typeof responseBody?.error === "string") detail = responseBody.error;
-    } catch {
-      // The response may not contain JSON.
-    }
-    const message = detail || (error.context.status === 404
-      ? "No se encontró customer-services. Despliega la función en Supabase antes de usar el mapa."
-      : `customer-services respondió HTTP ${error.context.status}.`);
-    return { data: null, error: new Error(message) };
-  }
-
-  if (error.name === "FunctionsFetchError") {
-    const cause = error.context instanceof Error ? ` (${error.context.message})` : "";
-    return {
-      data: null,
-      error: new Error(`No se pudo conectar con customer-services. Verifica que esté desplegada y que la conexión permita la solicitud.${cause}`)
-    };
-  }
-
-  return { data: null, error: new Error(error.message || "No se pudo completar la solicitud al servicio de mapas.") };
 }
 
 function usernameEmail(username) {
@@ -1293,8 +1264,10 @@ function renderOrderCards(orders, context = "") {
       buttons.push(`<label class="assign-control">Asignar motorizado<select data-action="assign" data-id="${order.id}"><option value="">${order.courier_id ? "Cambiar asignación…" : "Seleccionar…"}</option>${couriersForOrder(order).map((profile) => `<option value="${profile.id}" ${profile.id === order.courier_id ? "selected" : ""}>${escapeHtml(profile.full_name)}</option>`).join("")}</select></label>`);
     }
     const isCourier = state.profile.role === "motorizado";
-    const priceLabel = order.service_type && order.service_type !== "traslado" && !order.released
+    const priceLabel = order.service_type && !order.released && order.service_type !== "traslado"
       ? `<strong>Cotización:</strong> Pendiente de soporte`
+      : order.service_type === "traslado" && !order.released
+        ? `<strong>Tarifa estimada:</strong> ${formatMoney(order.delivery_fee, order.currency)} · pendiente de revisión`
       : isCourier
         ? `<strong>Tu ganancia (${courierEarningsPercentage()}%):</strong> ${formatMoney(courierEarnings(order), order.currency)}`
         : `<strong>Delivery:</strong> ${formatMoney(order.delivery_fee, order.currency)}`;
@@ -1304,8 +1277,8 @@ function renderOrderCards(orders, context = "") {
     return `<article class="order-card"><div class="order-top"><div><h3>${ally} <span class="muted">· ${escapeHtml(order.client_name)}</span></h3><p>Pedido #${order.id.slice(0, 8)} · ${dateTime(order.created_at)}</p></div>${orderStatus}</div>
       ${renderDeadline(order)}
       ${context === "current" && order.allies?.location_url ? `<div class="merchant-location"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.allies.location_url)}">Ubicación del comercio</button></div>` : ""}
-      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br>${order.service_type ? `<strong>Tipo:</strong> ${escapeHtml(serviceNames[order.service_type] || order.service_type)}${order.transport_mode ? ` · ${order.transport_mode === "express" ? "Express" : "Económico"}` : ""}<br><strong>Recogida:</strong> ${escapeHtml(order.pickup_address || "—")}<br><strong>Destino:</strong> ${escapeHtml(order.destination_address || order.address || "—")}${order.route_distance_meters ? `<br><strong>Distancia Google:</strong> ${(order.route_distance_meters / 1000).toFixed(2)} km` : ""}` : `<strong>Dirección:</strong> ${escapeHtml(order.address || "—")}`}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}${order.status === "cancelled" ? `<br><strong>Motivo de cancelación:</strong> ${escapeHtml(order.cancellation_reason || "No indicado")}<br><strong>Cancelado:</strong> ${dateTime(order.cancelled_at)}` : ""}<br>${priceLabel}</p>
-      ${order.maps_url ? `<div class="order-actions"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.maps_url)}">Abrir ubicación en Google Maps</button></div>` : ""}
+      <p class="order-detail"><strong>Cliente:</strong> ${escapeHtml(order.client_name)} · ${escapeHtml(order.client_phone)}<br><strong>Descripción:</strong> ${escapeHtml(order.description || "—")}<br>${order.service_type ? `<strong>Tipo:</strong> ${escapeHtml(serviceNames[order.service_type] || order.service_type)}${order.transport_mode ? ` · ${order.transport_mode === "express" ? "Express" : "Económico"}` : ""}<br><strong>Recogida:</strong> ${escapeHtml(order.pickup_address || "—")}<br><strong>Destino:</strong> ${escapeHtml(order.destination_address || order.address || "—")}${order.route_distance_meters ? `<br><strong>Distancia estimada:</strong> ${(order.route_distance_meters / 1000).toFixed(2)} km` : ""}` : `<strong>Dirección:</strong> ${escapeHtml(order.address || "—")}`}<br><strong>Motorizado:</strong> ${courier === "Sin asignar" ? escapeHtml(order.courier_name || courier) : courier}<br><strong>Creado por:</strong> ${escapeHtml(order.creator?.full_name || order.creator_name || "—")}${context === "completed" ? `<br><strong>Recogida en comercio:</strong> ${dateTime(order.at_store_at)}<br><strong>Entrega:</strong> ${dateTime(order.delivered_at)}` : ""}${order.status === "cancelled" ? `<br><strong>Motivo de cancelación:</strong> ${escapeHtml(order.cancellation_reason || "No indicado")}<br><strong>Cancelado:</strong> ${dateTime(order.cancelled_at)}` : ""}<br>${priceLabel}</p>
+      ${order.maps_url ? `<div class="order-actions"><button class="button subtle small" data-action="maps" data-url="${escapeHtml(order.maps_url)}">Abrir mapa</button></div>` : ""}
       ${buttons.length ? `<div class="order-actions">${buttons.join("")}</div>` : ""}</article>`;
   }).join("");
 }
@@ -1373,7 +1346,7 @@ function renderCreateOrder() {
     <label>Precio del delivery<input name="deliveryFee" type="number" min="0" step="any" inputmode="decimal" required></label>
     <label class="wide">Descripción del pedido<textarea name="description" placeholder="Ej.: Torta, traslado, encomienda..." required></textarea></label>
     <label class="wide">Dirección escrita<textarea name="address"></textarea></label>
-    <label class="wide">Ubicación de Google Maps (URL)<input name="mapsUrl" type="url" placeholder="https://maps.google.com/..."></label>
+    <label class="wide">Ubicación del mapa (URL)<input name="mapsUrl" type="url" placeholder="https://..."></label>
     <div class="wide"><button class="button primary" type="submit">Crear pedido</button></div>
   </form></article>`;
 }
@@ -1393,7 +1366,7 @@ function renderCustomerService() {
   const { pickup, destination, serviceType, mode } = state.serviceDraft;
   const pickupLabel = pickup?.address || (pickup ? `${pickup.lat.toFixed(5)}, ${pickup.lng.toFixed(5)}` : "Selecciona la recogida en el mapa");
   const destinationLabel = destination?.address || (destination ? `${destination.lat.toFixed(5)}, ${destination.lng.toFixed(5)}` : "Selecciona el destino en el mapa");
-  return `<p class="muted">Elige el servicio y ajusta los pines de recogida y destino. El traslado se calcula con distancia vehicular de Google Maps.</p>
+  return `<p class="muted">Elige el servicio y ajusta los pines de recogida y destino. La búsqueda y las rutas usan OpenStreetMap; el cálculo de distancia es una estimación del servicio público de rutas.</p>
     <article class="card form-card service-form-card"><form id="customer-service-form" class="form-grid">
       <label>Tipo de servicio<select id="service-type" name="serviceType" required>
         <option value="traslado" ${serviceType === "traslado" ? "selected" : ""}>Traslado</option>
@@ -1408,18 +1381,18 @@ function renderCustomerService() {
       <label class="wide">Descripción del servicio<textarea name="description" required maxlength="1000" placeholder="${serviceType === "compra" ? "Indica lo que necesitas comprar y, si aplica, cantidades o preferencias." : serviceType === "encomienda" ? "Describe el paquete y cualquier indicación para retirarlo o entregarlo." : serviceType === "traslado" ? "Indica cuántas personas o qué deseas trasladar." : "Describe el pedido que deseas recibir."}"></textarea></label>
       <div class="wide service-points">
         <div class="section-head"><h2>Recogida</h2><span id="pickup-summary" class="muted">${escapeHtml(pickupLabel)}</span></div>
-        <label>Buscar lugar en Google Maps<input id="pickup-search" type="search" autocomplete="off" placeholder="Ej.: CC Las Américas, Maracay"></label>
+        <label>Buscar lugar<input id="pickup-search" type="search" autocomplete="off" placeholder="Ej.: CC Las Américas, Maracay"></label>
         <div id="pickup-suggestions" class="place-suggestions" role="listbox"></div>
         <button type="button" class="button subtle small" data-action="use-current-location">Usar mi ubicación para la recogida</button>
       </div>
       <div class="wide service-points">
         <div class="section-head"><h2>Destino</h2><span id="destination-summary" class="muted">${escapeHtml(destinationLabel)}</span></div>
-        <label>Buscar lugar en Google Maps<input id="destination-search" type="search" autocomplete="off" placeholder="Busca una dirección o lugar"></label>
+        <label>Buscar lugar<input id="destination-search" type="search" autocomplete="off" placeholder="Busca una dirección o lugar"></label>
         <div id="destination-suggestions" class="place-suggestions" role="listbox"></div>
       </div>
       <div class="wide"><div class="map-point-controls"><span class="muted">Pin seleccionado para mover:</span><button type="button" class="button ${state.serviceDraft.activePoint === "pickup" ? "primary" : "subtle"} small" data-map-point="pickup">Recogida</button><button type="button" class="button ${state.serviceDraft.activePoint === "destination" ? "primary" : "subtle"} small" data-map-point="destination">Destino</button></div>
         <div id="service-map" class="service-map" role="application" aria-label="Selecciona los puntos de recogida y destino"></div>
-        <p class="fine-print">Puedes buscar el lugar, arrastrar cada pin o seleccionar el punto activo y pulsar sobre el mapa.</p>
+        <p class="fine-print">Datos del mapa y búsqueda © OpenStreetMap contributors. Puedes buscar un lugar, arrastrar cada pin o seleccionar el punto activo y tocar el mapa.</p>
       </div>
       <div id="service-quote" class="wide quote-message">${serviceType === "traslado" && state.serviceDraft.fee !== null ? `Distancia: ${(state.serviceDraft.distanceMeters / 1000).toFixed(2)} km · Tarifa: ${formatMoney(state.serviceDraft.fee, "USD")}` : serviceType === "traslado" ? "Selecciona ambos puntos y calcula la tarifa para ver el precio." : "Soporte revisará y cotizará este servicio antes de asignarlo."}</div>
       <div class="wide service-submit-row">
@@ -1591,71 +1564,126 @@ async function searchPlaces(point, query) {
     return;
   }
   const requestedQuery = query.trim();
-  const { data, error } = await invokeCustomerServices({ action: "places", query: requestedQuery });
+  const wait = Math.max(0, 1100 - (Date.now() - state.lastGeocodeRequestAt));
+  if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
   if (document.querySelector(`#${point}-search`)?.value.trim() !== requestedQuery) return;
-  if (error) {
-    target.innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
-    console.error("Error en búsqueda de Google Places:", error);
-    return;
+  state.lastGeocodeRequestAt = Date.now();
+  const params = new URLSearchParams({
+    format: "jsonv2",
+    addressdetails: "1",
+    limit: "6",
+    countrycodes: "ve",
+    q: requestedQuery
+  });
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      headers: { "accept-language": "es" }
+    });
+    if (!response.ok) throw new Error(`El buscador de OpenStreetMap respondió HTTP ${response.status}.`);
+    const results = await response.json();
+    if (document.querySelector(`#${point}-search`)?.value.trim() !== requestedQuery) return;
+    state.placeSearchResults[point] = results.map((place) => ({
+      placeId: String(place.place_id),
+      description: place.display_name,
+      lat: Number(place.lat),
+      lng: Number(place.lon)
+    })).filter((place) => Number.isFinite(place.lat) && Number.isFinite(place.lng));
+    target.innerHTML = state.placeSearchResults[point].length
+      ? state.placeSearchResults[point].map((place, index) => `<button type="button" class="place-option" role="option" data-place-point="${point}" data-place-index="${index}">${escapeHtml(place.description)}</button>`).join("")
+      : `<p class="muted place-empty">No se encontraron lugares.</p>`;
+    target.querySelectorAll("[data-place-point]").forEach((button) => button.addEventListener("click", () => {
+      void chooseServicePlace(button.dataset.placePoint, Number(button.dataset.placeIndex));
+    }));
+  } catch (error) {
+    if (document.querySelector(`#${point}-search`)?.value.trim() !== requestedQuery) return;
+    target.innerHTML = `<p class="error">${escapeHtml(error.message || "No se pudo buscar lugares.")}</p>`;
+    console.error("Error en búsqueda de OpenStreetMap:", error);
   }
-  const places = Array.isArray(data?.places) ? data.places : [];
-  state.placeSearchResults[point] = places;
-  target.innerHTML = places.length
-    ? places.map((place, index) => `<button type="button" class="place-option" role="option" data-place-point="${point}" data-place-index="${index}">${escapeHtml(place.description)}</button>`).join("")
-    : `<p class="muted place-empty">No se encontraron lugares.</p>`;
-  target.querySelectorAll("[data-place-point]").forEach((button) => button.addEventListener("click", () => {
-    void chooseServicePlace(button.dataset.placePoint, Number(button.dataset.placeIndex));
-  }));
 }
 
 async function chooseServicePlace(point, index) {
   const place = state.placeSearchResults[point]?.[index];
-  if (!place?.placeId) return;
-  const { data, error } = await invokeCustomerServices({ action: "place-details", placeId: place.placeId });
-  if (error) return reportError(error);
-  if (!Number.isFinite(data?.location?.latitude) || !Number.isFinite(data?.location?.longitude)) {
-    return showToast("Google Maps no devolvió coordenadas para ese lugar.", true);
-  }
+  if (!place) return;
   updateServicePoint(point, {
-    lat: data.location.latitude,
-    lng: data.location.longitude,
-    address: data.address || place.description
+    lat: place.lat,
+    lng: place.lng,
+    address: place.description
   });
   const input = document.querySelector(`#${point}-search`);
-  if (input) input.value = data.address || place.description;
+  if (input) input.value = place.description;
   const suggestions = document.querySelector(`#${point}-suggestions`);
   if (suggestions) suggestions.innerHTML = "";
+}
+
+function estimateDrivingDistanceMeters(pickup, destination) {
+  const radians = (degrees) => degrees * Math.PI / 180;
+  const latitudeDelta = radians(destination.lat - pickup.lat);
+  const longitudeDelta = radians(destination.lng - pickup.lng);
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(radians(pickup.lat)) * Math.cos(radians(destination.lat))
+    * Math.sin(longitudeDelta / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(haversine)) * 1.3;
 }
 
 async function calculateServiceRoute() {
   const { pickup, destination, mode } = state.serviceDraft;
   if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
-  const { data, error } = await invokeCustomerServices({ action: "route", pickup, destination, mode });
-  if (error) return reportError(error);
-  state.serviceDraft.distanceMeters = data.distanceMeters;
-  state.serviceDraft.fee = data.fee;
+  let distanceMeters;
+  let usedFallback = false;
+  try {
+    const coordinates = `${pickup.lng},${pickup.lat};${destination.lng},${destination.lat}`;
+    const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=false&steps=false`);
+    if (!response.ok) throw new Error(`El servicio de rutas respondió HTTP ${response.status}.`);
+    const result = await response.json();
+    distanceMeters = result.code === "Ok" ? result.routes?.[0]?.distance : null;
+    if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+      return reportError(new Error("No se encontró una ruta vehicular entre los puntos seleccionados."));
+    }
+  } catch (error) {
+    console.warn("No se pudo consultar la ruta comunitaria; se usará una estimación aproximada:", error);
+    distanceMeters = estimateDrivingDistanceMeters(pickup, destination);
+    usedFallback = true;
+  }
+  if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+    return reportError(new Error("Los puntos de recogida y destino deben ser distintos para calcular el traslado."));
+  }
+  const rate = mode === "express" ? 0.45 : 0.35;
+  const fee = Math.round((distanceMeters / 1000) * rate * 100) / 100;
+  state.serviceDraft.distanceMeters = Math.round(distanceMeters);
+  state.serviceDraft.fee = fee;
   const quote = document.querySelector("#service-quote");
-  if (quote) quote.textContent = `Distancia vehicular: ${(data.distanceMeters / 1000).toFixed(2)} km · Tarifa: ${formatMoney(data.fee, "USD")}`;
+  if (quote) quote.textContent = `${usedFallback ? "Estimación aproximada (distancia directa + 30%)" : "Distancia estimada por carretera"}: ${(distanceMeters / 1000).toFixed(2)} km · Tarifa estimada: ${formatMoney(fee, "USD")}`;
+  if (usedFallback) showToast("El servicio de rutas no respondió; se usó una estimación aproximada. Soporte revisará el precio.");
+  return true;
 }
 
 async function requestCustomerService(event) {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  const form = event.currentTarget;
+  const data = new FormData(form);
   const { pickup, destination } = state.serviceDraft;
   if (!pickup || !destination) return showToast("Selecciona la recogida y el destino en el mapa.", true);
-  const { data: result, error } = await invokeCustomerServices({
-    action: "create-request",
-    serviceType: data.get("serviceType"),
-    mode: data.get("serviceType") === "traslado" ? data.get("transportMode") : null,
-    description: String(data.get("description")).trim(),
-    pickup,
-    destination
+  const serviceType = String(data.get("serviceType"));
+  if (serviceType === "traslado") {
+    if (!await calculateServiceRoute()) return;
+  }
+  const { error } = await supabase.rpc("create_customer_service_order", {
+    p_customer_id: state.profile.id,
+    p_service_type: serviceType,
+    p_transport_mode: serviceType === "traslado" ? data.get("transportMode") : null,
+    p_description: String(data.get("description")).trim(),
+    p_pickup_address: pickup.address || `${pickup.lat}, ${pickup.lng}`,
+    p_destination_address: destination.address || `${destination.lat}, ${destination.lng}`,
+    p_pickup_latitude: pickup.lat,
+    p_pickup_longitude: pickup.lng,
+    p_destination_latitude: destination.lat,
+    p_destination_longitude: destination.lng,
+    p_route_distance_meters: serviceType === "traslado" ? state.serviceDraft.distanceMeters : null,
+    p_delivery_fee: serviceType === "traslado" ? state.serviceDraft.fee : 0
   });
   if (error) return reportError(error);
-  state.serviceDraft.distanceMeters = result.distanceMeters ?? null;
-  state.serviceDraft.fee = result.fee ?? null;
-  showToast(data.get("serviceType") === "traslado"
-    ? `Solicitud enviada. Tarifa calculada: ${formatMoney(result.fee, "USD")}.`
+  showToast(serviceType === "traslado"
+    ? `Solicitud enviada. Tarifa estimada: ${formatMoney(state.serviceDraft.fee, "USD")}. Soporte la revisará.`
     : "Solicitud enviada; soporte la revisará y cotizará.");
   state.screen = "historial_cliente";
   destroyServiceMap();
@@ -2114,7 +2142,12 @@ function bindOrderActions() {
   document.querySelectorAll('[data-action="release"]').forEach((button) => button.addEventListener("click", () => updateOrder(button.dataset.id, "release_order")));
   document.querySelectorAll('[data-action="cancel-order"]').forEach((button) => button.addEventListener("click", () => cancelOrder(button.dataset.id)));
   document.querySelectorAll('[data-action="quote-service"]').forEach((button) => button.addEventListener("click", async () => {
-    const rawFee = window.prompt("Ingresa el costo del delivery en USD:");
+    const order = state.orders.find((item) => item.id === button.dataset.id);
+    const prompt = order?.service_type === "traslado"
+      ? "Revisa o ajusta la tarifa estimada del traslado en USD:"
+      : "Ingresa el costo del delivery en USD:";
+    const initialFee = order ? Number(order.delivery_fee).toFixed(2) : "";
+    const rawFee = window.prompt(prompt, initialFee);
     if (rawFee === null) return;
     const fee = Number(rawFee.replace(",", "."));
     if (!Number.isFinite(fee) || fee < 0) return showToast("Ingresa un precio válido en USD.", true);
